@@ -1,0 +1,63 @@
+{
+  "name": "dsh-command-guard",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness 插件：自动审核 agent 发出的 shell 命令，风险命令以界面确认卡片询问用户（支持硬规则 / agent 自审多档位），可配 directDeny 硬拦截底线。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./risk": "./lib/risk.js",
+    "./rules": "./lib/rules.js",
+    "./client": "./client/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-commands",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "client",
+    "src",
+    "build",
+    "tsconfig.host.json",
+    "tsconfig.client.json",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p src/client/tsconfig.json && node build/bundle-client.mjs",
+    "test": "npm run build && node test/run.js && node test/integration.js"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "command",
+    "approval",
+    "security"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": "^0.1.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": "^0.1.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "typescript": "^7.0.2"
+  }
+}

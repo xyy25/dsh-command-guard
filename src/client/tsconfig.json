@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "commonjs",
+    "jsx": "react",
+    "lib": ["es2022", "dom"],
+    "rootDir": ".",
+    "outDir": "../../.tmp-client-cjs",
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "skipLibCheck": true,
+    "types": [],
+    "declaration": false,
+    "sourceMap": false,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": false
+  },
+  "include": ["**/*.ts", "**/*.tsx", "**/*.d.ts"]
+}

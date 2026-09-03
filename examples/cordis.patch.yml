@@ -1,0 +1,26 @@
+# dsh-command-guard 安装示例：追加到 profile 的 cordis.patch.yml
+# （如 ~/.dsh/profiles/web/cordis.patch.yml），
+# 并先把插件安装为 profile 依赖：
+#   dsh plugin --profile web add link:G:\dsh-dev\plugins\dsh-command-guard
+#
+# 注意：cordis.patch.yml 本身是顶层数组，把下面的条目合入该数组即可。
+- insert:
+    - id: command-guard
+      name: 'dsh-command-guard'
+      config:
+        enabled: true
+        tools: [pwsh, bash]
+        mode: rules              # rules / agent-very-loose / agent-loose / agent-standard / agent-strict
+        directDeny: false        # true：命中 denyMinLevel 的命令直接拒绝（默认一律弹卡询问）
+        denyMinLevel: critical
+        askMinLevel: high
+        agentFallback: rules     # agent 自审不可用时的回落：rules / allow / ask
+        logDecisions: true
+        maxCommandPreviewBytes: 300
+        allowCommands: []
+        disabledRuleIds: []
+        rules: []
+        llm:
+          enabled: false
+          timeoutMs: 15000
+          allowOnFailure: true
