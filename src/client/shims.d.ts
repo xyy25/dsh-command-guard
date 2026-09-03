@@ -25,3 +25,13 @@ declare module "@deepseek-ai/dsh-client-runtime/client" {
   }
   export function createSnapshotStore<T extends object>(initial: T): SnapshotStore<T>;
 }
+
+declare module "@deepseek-ai/dsh-client-ui-user-questions" {
+  export class PendingQuestion {
+    constructor(wait: any);
+    readonly key: string;
+    readonly questions: any[];
+    answer(answer: any): Promise<void>;
+    cancel(): Promise<void>;
+  }
+}

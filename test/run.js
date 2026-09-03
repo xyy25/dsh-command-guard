@@ -43,7 +43,15 @@ test("根目录递归删除 → deny", () => {
 test("格式化磁盘 → deny", () => {
   expectKind("Format-Volume -DriveLetter C -FileSystem NTFS", "deny");
   expectKind("format c:", "deny");
+  expectKind("format C: /FS:NTFS /Q", "deny");
   expectKind("diskpart", "deny");
+});
+
+test("只读 Format-* cmdlet 与含 format 子串的命令不再误伤（回归）", () => {
+  expectKind("Get-ChildItem | Format-Table -AutoSize", "allow");
+  expectKind("Format-Hex C:\\x.bin", "allow");
+  expectKind("Get-Content app.log | Format-List", "allow");
+  expectKind("git log --format='%h %s'", "allow"); // 常见只读 git 格式串
 });
 
 test("关闭安全防护 → deny", () => {

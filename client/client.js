@@ -60,6 +60,7 @@ exports.apply = apply;
 const React = __importStar(require("react"));
 const dsh_client_ui_primitives_1 = require("@deepseek-ai/dsh-client-ui-primitives");
 const client_1 = require("@deepseek-ai/dsh-client-runtime/client");
+const dsh_client_ui_user_questions_1 = require("@deepseek-ai/dsh-client-ui-user-questions");
 // ---------------------------------------------------------------------------
 // 样式：与官方权限行一致的视觉。样式以字符串注入 <style>（无 CSS 构建链）。
 // ---------------------------------------------------------------------------
@@ -92,14 +93,19 @@ const ROW_CLASSES = Object.freeze({
     chevron: "oY77xG_chevron",
 });
 /** 输入区按钮样式。 */
-const ZONE_CSS = ".cgZn_selector{background:var(--dsw-alias-bg-module-platform);height:32px;font:inherit;color:var(--dsw-alias-label-primary);cursor:pointer;border:none;border-radius:16px;align-items:center;gap:8px;padding:0 10px;font-size:13px;line-height:20px;display:inline-flex;max-width:180px;white-space:nowrap;overflow:hidden}" +
+const ZONE_CSS = ".cgZn_selector{background:var(--dsw-alias-bg-module-platform);width:28px;height:28px;font:inherit;color:var(--dsw-alias-label-primary);cursor:pointer;border:none;border-radius:14px;align-items:center;justify-content:center;gap:0;padding:0;font-size:13px;line-height:20px;display:inline-flex}" +
     ".cgZn_selector:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}" +
     ".cgZn_selector:disabled{cursor:default}.cgZn_chevron{flex:none}" +
-    ".cgZn_error{color:var(--dsw-alias-state-error-primary);font-weight:700;margin-right:4px}";
+    ".cgZn_error{color:var(--dsw-alias-state-error-primary);font-weight:700;margin-right:4px}" +
+    ".cgZn_popover{background:var(--dsw-specific-input-major);border:1px solid var(--dsw-alias-border-l2-darkmode-thin);border-radius:12px;box-shadow:var(--dsw-shadow-lv2);color:var(--dsw-alias-label-primary);padding:6px;z-index:1200}" +
+    ".cgZn_popover [role=menuitem]:hover{background:var(--dsw-alias-interactive-bg-hover)}" +
+    ".cgZn_popoverActive{background:var(--dsw-alias-interactive-bg-hover);font-weight:600}";
 const ZONE_CLASSES = Object.freeze({
     selector: "cgZn_selector",
     chevron: "cgZn_chevron",
     error: "cgZn_error",
+    popover: "cgZn_popover",
+    popoverActive: "cgZn_popoverActive",
 });
 injectStyle("dsh-command-guard/GuardModeRow.module.css", ROW_CSS);
 injectStyle("dsh-command-guard/GuardZone.module.css", ZONE_CSS);
@@ -144,13 +150,60 @@ function GuardModeRow({ load, select, useGuardMode, t }) {
 // ---------------------------------------------------------------------------
 // 输入区常驻档位下拉（conversation.input.left 条目）
 // ---------------------------------------------------------------------------
-/** 输入区按钮固定标签（zone 条目没有 locale 机制，与档位选项一致固定中文）。 */
+/** 输入区按钮固定标题（zone 条目没有 locale 机制，与档位选项一致固定中文）。 */
 const ZONE_LABEL = "命令审核";
-function GuardZone({ session, pickMode, currentMode }) {
+/** 档位 → 图标状态：颜色（按阈值由浅到深）+ 符号（rules 用字母，agent 档用点数 1–4）。 */
+const MODE_ICON = Object.freeze({
+    rules: { color: "#8ab4f8", dotCount: 0, letter: "R" },
+    "agent-very-loose": { color: "#7fd4a0", dotCount: 1 },
+    "agent-loose": { color: "#f2c14e", dotCount: 2 },
+    "agent-standard": { color: "#f39a4b", dotCount: 3 },
+    "agent-strict": { color: "#e0574f", dotCount: 4 },
+});
+/** 盾形守卫图标：模式状态用颜色 + 符号区分，供"仅图标"按钮使用。 */
+function ShieldIcon({ mode }) {
+    const conf = MODE_ICON[mode] ?? MODE_ICON.rules;
+    const dots = [];
+    for (let i = 0; i < conf.dotCount; i += 1)
+        dots.push(i);
+    return (React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 16 16", "aria-hidden": "true" },
+        React.createElement("path", { d: "M8 1.2L13.8 3v4.1c0 3.9-2.3 6.7-5.8 7.8C4.5 13.8 2.2 11 2.2 7.1V3z", fill: conf.color }),
+        conf.letter
+            ? (React.createElement("text", { x: "8", y: "11", textAnchor: "middle", fontSize: "7", fontWeight: "700", fill: "#0b1220", style: { userSelect: "none" } }, conf.letter))
+            : dots.map((i) => (React.createElement("circle", { key: i, cx: 8 - (conf.dotCount - 1) * 1.7 + i * 3.4, cy: "8.6", r: "1.1", fill: "#0b1220" })))));
+}
+function GuardZone({ session, pickMode, readDefaultMode }) {
     const [open, setOpen] = React.useState(false);
     const [current, setCurrent] = React.useState(null);
     const [error, setError] = React.useState(null);
+    const hostRef = React.useRef(null);
     const sessionId = session?.sessionId;
+    // 初始档位：读 settings 默认档（不触发宿主命令，避免在会话里产生"guard · …"状态行）
+    React.useEffect(() => {
+        let alive = true;
+        if (typeof readDefaultMode === "function") {
+            void readDefaultMode(sessionId).then((mode) => {
+                if (alive && mode !== null)
+                    setCurrent(mode);
+            }).catch(() => {
+                /* 读取默认档失败不影响交互 */
+            });
+        }
+        return () => {
+            alive = false;
+        };
+    }, [readDefaultMode, sessionId]);
+    // 点击外部关闭向上弹层
+    React.useEffect(() => {
+        if (!open)
+            return;
+        const onDown = (event) => {
+            if (hostRef.current && !hostRef.current.contains(event.target))
+                setOpen(false);
+        };
+        document.addEventListener("mousedown", onDown);
+        return () => document.removeEventListener("mousedown", onDown);
+    }, [open]);
     const fail = (where, cause) => {
         const message = cause instanceof Error ? cause.message : String(cause);
         try {
@@ -161,35 +214,15 @@ function GuardZone({ session, pickMode, currentMode }) {
         }
         setError(`${where} 失败：${message}`);
     };
-    const openMenu = async () => {
-        setError(null);
-        setCurrent(null);
-        if (sessionId === undefined) {
-            setError("zone 未提供会话信息（client 装配问题），请改用 /guard 命令");
-            setOpen(true);
-            return;
-        }
-        if (typeof currentMode === "function") {
-            try {
-                const mode = await currentMode(sessionId);
-                if (mode !== null)
-                    setCurrent(mode);
-            }
-            catch (cause) {
-                fail("读取当前档位", cause);
-            }
-        }
-        setOpen(true);
-    };
     const pick = async (id) => {
         setOpen(false);
-        if (typeof pickMode !== "function") {
-            setError("档位切换通道未注入（client 装配问题），请改用 /guard 命令");
+        if (sessionId === undefined) {
+            setError("zone 未提供会话信息（client 装配问题），请改用 /guard 命令");
             setOpen(true);
             return;
         }
-        if (sessionId === undefined) {
-            setError("zone 未提供会话信息（client 装配问题），请改用 /guard 命令");
+        if (typeof pickMode !== "function") {
+            setError("档位切换通道未注入（client 装配问题），请改用 /guard 命令");
             setOpen(true);
             return;
         }
@@ -208,18 +241,100 @@ function GuardZone({ session, pickMode, currentMode }) {
             return null;
         return MODE_OPTIONS.find((option) => option.id === current)?.label ?? null;
     })();
-    return (React.createElement(React.Fragment, null,
+    return (React.createElement("span", { ref: hostRef, style: { position: "relative", display: "inline-flex", alignItems: "center" } },
         error !== null && (React.createElement("span", { className: ZONE_CLASSES.error, title: error, "aria-label": error }, "!")),
-        React.createElement(dsh_client_ui_primitives_1.Menu, { open: open, onClose: () => setOpen(false), items: MODE_OPTIONS.map((option) => ({ id: option.id, label: option.label })), selectedId: current ?? undefined, onSelect: pick, align: "start", portal: true, anchor: React.createElement("button", { type: "button", className: ZONE_CLASSES.selector, "aria-haspopup": "menu", "aria-expanded": open, title: error ?? ZONE_LABEL, onClick: () => {
-                    if (open) {
-                        setOpen(false);
-                    }
-                    else {
-                        void openMenu();
-                    }
-                } },
-                currentLabel ?? ZONE_LABEL,
-                React.createElement(dsh_client_ui_primitives_1.IconChevronDownOutline14, { className: ZONE_CLASSES.chevron })) })));
+        React.createElement("button", { type: "button", className: ZONE_CLASSES.selector, "aria-haspopup": "menu", "aria-expanded": open, title: error ?? (currentLabel ? `${ZONE_LABEL}（当前：${currentLabel}）` : ZONE_LABEL), onClick: () => setOpen((value) => !value) },
+            React.createElement(ShieldIcon, { mode: current ?? "rules" })),
+        open && (React.createElement("div", { role: "menu", className: ZONE_CLASSES.popover, style: {
+                position: "absolute",
+                bottom: "calc(100% + 6px)",
+                left: "0",
+                minWidth: "200px",
+                maxHeight: "min(320px, 60vh)",
+                overflowY: "auto",
+            } }, MODE_OPTIONS.map((option) => {
+            const active = option.id === current;
+            return (React.createElement("div", { key: option.id, role: "menuitem", className: active ? ZONE_CLASSES.popoverActive : undefined, style: { fontSize: 13, lineHeight: "20px", padding: "8px 12px", cursor: "pointer" }, title: option.detail, onClick: () => void pick(option.id) },
+                React.createElement(ShieldIcon, { mode: option.id }),
+                React.createElement("span", { style: { marginLeft: 8 } }, option.label)));
+        })))));
+}
+// ---------------------------------------------------------------------------
+// 确认卡（approval 风格：一次点击生效 + 可选输入框）
+// ---------------------------------------------------------------------------
+/** 确认卡固定文案（composer 条目无 locale 依赖时仍可用；同时提供 zh/en 字典）。 */
+const APPROVAL_LOCALES_ZH = {
+    waiting: "命令审核需确认",
+    placeholder: "（可选）告诉 Agent 希望如何调整",
+    reject: "拒绝执行",
+    submit: "提交",
+    allow: "允许执行",
+};
+const APPROVAL_LOCALES_EN = {
+    waiting: "Command review required",
+    placeholder: "(optional) tell the Agent how to adjust",
+    reject: "Reject",
+    submit: "Submit",
+    allow: "Allow",
+};
+const APPROVAL_CSS = ".gzc_root{padding:8px calc(var(--dsh-composer-side-clearance) + 16px) 12px;flex-direction:column;align-items:center;display:flex}" +
+    ".gzc_card{width:100%;max-width:var(--dsh-chat-content-width);border:1px solid var(--dsw-alias-state-warn-secondary);background:var(--dsw-specific-input-major);box-shadow:var(--dsw-shadow-lv2);border-radius:20px;overflow:hidden}" +
+    ".gzc_strip{background:var(--dsw-alias-state-warn-tertiary);color:var(--dsw-alias-state-warn-primary);align-items:center;gap:8px;padding:10px 16px;font-size:13px;line-height:18px;display:flex}" +
+    ".gzc_dot{background:var(--dsw-alias-state-warn-primary);border-radius:50%;width:8px;height:8px}" +
+    ".gzc_body{box-sizing:border-box;max-height:min(50vh,420px);padding:12px 16px 0;color:var(--dsw-alias-label-primary);overflow-y:auto}" +
+    ".gzc_actionRow{justify-content:flex-end;align-items:center;gap:8px;padding:12px 16px 14px;display:flex}" +
+    ".gzc_input{background:var(--dsw-alias-bg-module-platform);border:1px solid var(--dsw-alias-border-l2);border-radius:12px;color:var(--dsw-alias-label-primary);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;padding:6px 10px;width:min(220px,40vw);outline:none}" +
+    ".gzc_input:focus{border-color:var(--dsw-alias-state-warn-primary)}";
+const APPROVAL_CLASSES = Object.freeze({
+    root: "gzc_root",
+    card: "gzc_card",
+    strip: "gzc_strip",
+    dot: "gzc_dot",
+    body: "gzc_body",
+    actionRow: "gzc_actionRow",
+    input: "gzc_input",
+});
+injectStyle("dsh-command-guard/GuardApprovalCard.module.css", APPROVAL_CSS);
+/**
+ * 确认卡：与沙箱拦截的 approval 面板同风格（警告条 + 可滚动命令/说明 + 右下角按钮）。
+ * 按钮一次点击即生效；左侧输入框有内容时，拒绝按钮变为"提交"并携带文本回传 host。
+ */
+function GuardApprovalCard({ matched }) {
+    const pending = React.useMemo(() => (matched ? new dsh_client_ui_user_questions_1.PendingQuestion(matched) : null), [matched]);
+    const question = pending?.questions?.[0];
+    const [note, setNote] = React.useState("");
+    const [busy, setBusy] = React.useState(false);
+    if (pending === null || question === undefined)
+        return null;
+    const approveLabel = typeof question?.intent?.approve === "string" ? question.intent.approve : APPROVAL_LOCALES_ZH.allow;
+    const options = Array.isArray(question?.options) ? question.options : [];
+    const denyOption = options.find((option) => option.label !== approveLabel);
+    const denyLabel = typeof denyOption?.label === "string" ? denyOption.label : APPROVAL_LOCALES_ZH.reject;
+    const hasNote = note.trim().length > 0;
+    const commit = async (label, custom) => {
+        if (busy)
+            return;
+        setBusy(true);
+        try {
+            await pending.answer({
+                answers: [{ id: question.id, selected: [label], ...(custom !== undefined ? { custom } : {}) }],
+            });
+        }
+        catch {
+            setBusy(false);
+        }
+    };
+    return (React.createElement("div", { className: APPROVAL_CLASSES.root, "data-guard-approval-key": pending.key },
+        React.createElement("div", { className: APPROVAL_CLASSES.card },
+            React.createElement("div", { className: APPROVAL_CLASSES.strip },
+                React.createElement("span", { className: APPROVAL_CLASSES.dot }),
+                APPROVAL_LOCALES_ZH.waiting),
+            React.createElement("div", { className: APPROVAL_CLASSES.body, "data-guard-approval-scroll": "", tabIndex: 0, role: "group", "aria-label": "\u547D\u4EE4\u5BA1\u6838\u8BE6\u60C5" },
+                React.createElement(dsh_client_ui_primitives_1.MarkdownText, { text: question.detail ?? "" })),
+            React.createElement("div", { className: APPROVAL_CLASSES.actionRow },
+                React.createElement("input", { className: APPROVAL_CLASSES.input, value: note, disabled: busy, placeholder: APPROVAL_LOCALES_ZH.placeholder, "aria-label": APPROVAL_LOCALES_ZH.placeholder, onChange: (event) => setNote(event.currentTarget.value) }),
+                React.createElement(dsh_client_ui_primitives_1.Button, { variant: "outline", disabled: busy, onClick: () => void commit(denyLabel, hasNote ? note.trim() : undefined) }, hasNote ? APPROVAL_LOCALES_ZH.submit : APPROVAL_LOCALES_ZH.reject),
+                React.createElement(dsh_client_ui_primitives_1.Button, { variant: "primary", disabled: busy, onClick: () => void commit(approveLabel) }, APPROVAL_LOCALES_ZH.allow)))));
 }
 // ---------------------------------------------------------------------------
 // 设置行字典
@@ -466,20 +581,31 @@ function apply(ctx) {
     catch (error) {
         warn("settings row", error);
     }
-    // 3) 输入区常驻"命令审核"下拉（conversation.input.left，权限选择同排）
+    // 3) 输入区常驻"命令审核"图标下拉（conversation.input.left，权限选择同排）
+    //    切换走宿主 /guard <mode>（一次）。读取当前档位改为读 settings 默认档，
+    //    不再用裸 /guard 查询（避免在会话里产生"guard · …"状态行）。
     try {
-        const runGuard = async (sessionId, arg) => {
+        const runGuard = async (sessionId, mode) => {
             const sessions = ctx.get("sessions");
             const live = sessions?.binding(sessionId)?.session;
             if (live === undefined)
                 throw new Error("this session is not materialized yet");
-            const line = arg === null ? "/guard" : `/guard ${arg}`;
-            const result = await live.command(line);
+            const result = await live.command(`/guard ${mode}`);
             if (!result.ok)
                 throw new Error(`guard switch failed: ${result.error.code}: ${result.error.message}`);
             if (!result.value.matched)
                 throw new Error("the host offers no /guard command");
-            return typeof result.value?.text === "string" ? String(result.value.text).trim() : null;
+        };
+        const readDefaultMode = async () => {
+            try {
+                const mirror = ctx.settingsScope?.describe?.()?.getSnapshot?.();
+                const ns = mirror?.view?.namespaces?.find((entry) => entry.ns === GUARD_SETTINGS_NS);
+                const mode = ns?.value?.mode;
+                return typeof mode === "string" ? mode : null;
+            }
+            catch {
+                return null;
+            }
         };
         ctx.slots.inject("conversation.input.left", () => ctx.slots.register({
             name: "conversation.input.left",
@@ -489,12 +615,30 @@ function apply(ctx) {
                 pickMode: async (sessionId, mode) => {
                     await runGuard(sessionId, mode);
                 },
-                currentMode: async (sessionId) => runGuard(sessionId, null),
+                readDefaultMode,
             }),
         }, GuardZone));
     }
     catch (error) {
         warn("input-zone guard select", error);
+    }
+    // 4) 确认卡：composer 链上接管"guard-review"提问，渲染 approval 风格卡片
+    //    （一次点击生效 + 输入框：有内容时拒绝按钮变"提交"并携带文本回传）。
+    try {
+        ctx.slots.inject("conversation.composer", () => ctx.slots.register({
+            name: "conversation.composer",
+            priority: -5,
+            select: (owner) => {
+                const raw = (owner?.interactions ?? []).find((interaction) => interaction?.kind === "question" &&
+                    interaction?.payload?.questions?.[0]?.intent?.kind === "guard-review");
+                return raw ?? null;
+            },
+            locale: "guard.approval",
+        }, GuardApprovalCard));
+        ctx.effect(() => ctx.locale.register("guard.approval", { zh: { ...APPROVAL_LOCALES_ZH }, en: { ...APPROVAL_LOCALES_EN } }), "ui-command-guard: approval card dictionaries");
+    }
+    catch (error) {
+        warn("approval card composer", error);
     }
 }
 		return module.exports;

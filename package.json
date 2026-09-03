@@ -18,6 +18,7 @@
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-commands",
+        "@deepseek-ai/dsh-client-ui-user-questions",
         "@deepseek-ai/dsh-api-remotes",
         "@deepseek-ai/dsh-client-ui-settings"
       ],
@@ -29,8 +30,7 @@
     "client",
     "src",
     "build",
-    "tsconfig.host.json",
-    "tsconfig.client.json",
+    "tsconfig.json",
     "README.zh.md",
     "LICENSE"
   ],

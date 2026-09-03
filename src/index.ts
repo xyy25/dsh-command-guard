@@ -3,44 +3,46 @@
 // 能力：监听 `tools/pre-execute` waterfall，在 agent 调用 shell 类工具
 // （默认 pwsh / bash）之前自动审核 `command` 参数。
 //
-// 风险命令一律改为"在界面弹确认卡片向用户询问"（除非启用 directDeny
-// 硬拦截底线）：用户允许才放行本次调用，用户拒绝（或确认不可用）则
-// 作为 deny 返回给 agent，绝不静默放行未确认的风险命令。
+// 风险命令一律返回 `{ kind: "ask", reason }` 决策，由 harness 的
+// `tools/pre-execute` approval seam（`dsh-user-approval`，web/terminal UI
+// 原生弹批准框）询问用户：允许才放行本次调用，拒绝则 harness 返回 deny，
+// 无 approval 通道时由平台 fail closed 拒绝。除非启用 directDeny 硬拦截
+// 底线（命中达到 denyMinLevel 直接 `{ kind: "deny" }`）。
 //
 // 审核档位（见 ./modes.ts）：
-//   - rules（默认）           —— 硬规则引擎自动判定，命中达到阈值 → 确认卡片
+//   - rules（默认）           —— 硬规则引擎自动判定，命中达到阈值 → ask
 //   - agent-very-loose/loose/standard/strict —— 交给 agent(LLM) 自审，
-//        模型输出风险等级与用途/影响，达到档位阈值 → 确认卡片
+//        模型输出风险等级与用途/影响，达到档位阈值 → ask
 //
-// 档位来源优先级：当前会话事件 `command-guard/mode` → 设置默认档位
-// （settings namespace "commandGuard"）→ 插件 config.mode → "rules"。
+// 档位来源优先级：当前会话档位（本进程内按会话 id 记忆，见下）→ 设置
+// 默认档位（settings namespace "commandGuard"）→ 插件 config.mode → "rules"。
 //
-// UI 询问基于 `ctx.userQuestions.ask`（web 端渲染为富文本卡片，阻塞
-// 工具调用直到用户回答）。仅当调用方是 live root agent 且存在 UI provider
-// 时才可用；子代理 / 无 agent 上下文 / provider 缺失 / 用户取消时
-// fail closed 为 deny。
+// 注意：不要用 `agent.session.append()` 写入自定义事件类型（例如
+// "command-guard/mode"）。harness 的会话事件词汇表
+// （@deepseek-ai/dsh-session 的 KNOWN_SESSION_EVENT_TYPES）是编译期固定的，
+// 不包含任何 out-of-repo 插件事件；这类事件一旦落盘，重新加载该会话时
+// persistence 会以 SessionFormatUnsupportedError 拒绝整份日志（除非事件带
+// `ignorable: true`，而 append() 并不开放该标记）。因此会话档位只在
+// 本进程内记忆，不做跨重启持久化。
+//
+// 询问机制也不要绕道 `ctx.userQuestions.ask`：该服务注册在 agent/会话
+// 作用域，profile 级插件上下文通常取不到（结果为"无法弹窗"并 fail
+// closed）。正确做法是让 listener 返回 ask 决策，由 dsh-tools 在正确的
+// 作用域里路由到 approval seam。
 
 import z from "@deepseek-ai/schemastery";
 import { DEFAULT_ALLOW_COMMANDS, DEFAULT_RULES, type RuleDef } from "./rules.js";
 import { compilePatterns, compileRules, decideCommand, previewCommand, describeRule, type Rule, type Decision } from "./risk.js";
 import { reviewWithLlm, reviewByAgent } from "./llm.js";
 import { MODE_IDS, DEFAULT_MODE, modeOf, isAgentMode, shouldWarnForRisk } from "./modes.js";
-import { buildAskDetail, buildShortReason, buildDenyReason } from "./gate.js";
+import { buildAskDetail, buildShortReason } from "./gate.js";
 
 /** 插件名称与宿主依赖（loader 用）。 */
 export const name = "command-guard";
 export const inject = ["tools"];
 
-/** 会话事件类型：当前会话命令审核档位切换。 */
-const MODE_EVENT = "command-guard/mode";
 /** settings 命名空间：默认档位（新会话）。 */
 const MODE_SETTINGS_NS = "commandGuard";
-
-/** 确认卡片上的两个选项文案。 */
-const UI_OPTIONS = Object.freeze({
-  allow: "允许执行",
-  deny: "拒绝执行",
-});
 
 /**
  * 运行配置（结构定义见 Config）。apply 收到的是经 z 校验后的值。
@@ -127,28 +129,16 @@ function modeLabel(id: string): string {
   return MODE_LABEL_ZH[id] ?? id;
 }
 
-/** 会话事件的最小形状（只读取 fold 需要的字段）。 */
-interface SessionEventLike {
-  type?: string;
-  data?: { mode?: unknown };
-}
-
-/** 会话的最小面：可读事件、可 append 新事件。 */
+/** 会话的最小面：只需要稳定 id（本插件不再读写 harness 会话事件）。 */
 interface SessionLike {
-  events: SessionEventLike[];
-  append(type: string, data: unknown): void;
+  id?: string;
 }
 
-/** 从会话事件中折叠最近的档位事件。 */
-function modeFromEvents(events: readonly SessionEventLike[] | null | undefined, fallback: string): string {
-  if (!Array.isArray(events)) return fallback;
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (event && event.type === MODE_EVENT && event.data && typeof event.data.mode === "string") {
-      return modeOf(event.data.mode);
-    }
-  }
-  return fallback;
+/** 取会话的持久 id（无会话/无 id 时返回 undefined）。 */
+function sessionIdOf(session: SessionLike | undefined | null): string | undefined {
+  return session !== undefined && session !== null && typeof session.id === "string"
+    ? session.id
+    : undefined;
 }
 
 // ---- 宿主 ctx / exec 的宽松结构（仅声明插件用到的面，避免引入重型类型依赖）----
@@ -194,11 +184,6 @@ type GuardDecision =
   | { kind: "ask"; detail: string; reason: string }
   | { kind: "deny"; reason: string };
 
-/** userQuestions 答案（宽松）。 */
-interface UserAnswer {
-  answers?: { id?: unknown; selected?: unknown[] }[];
-}
-
 export function apply(ctx: HostContext, config: GuardConfig): void {
   if (!config.enabled) return;
 
@@ -218,6 +203,20 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
 
   /** 档位默认值：settings 注册成功 → settings 当前值；否则 config.mode。 */
   let defaultModeSource = (): string => config.mode;
+
+  /**
+   * 会话级档位覆盖（/guard <mode> 切换的结果）。
+   * 仅在本进程内按会话 id 记忆——不要写进 harness 会话日志（自定义事件
+   * 类型会导致日志无法重放，见文件头注释）。进程重启后新会话回落默认档。
+   */
+  const sessionModes = new Map<string, string>();
+
+  /** 当前会话档位：会话覆盖 → 默认档。 */
+  function currentModeOf(session: SessionLike | undefined | null): string {
+    const id = sessionIdOf(session);
+    if (id !== undefined && sessionModes.has(id)) return sessionModes.get(id)!;
+    return defaultModeSource();
+  }
 
   // ---------- settings：默认档位（新会话；复用 host settings 服务） ----------
   ctx.inject(["settings"], (settingsCtx: any) => {
@@ -247,8 +246,9 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
       input: { hint: "<mode>" },
       handler: ({ agent, rawInput }: { agent?: { session: SessionLike }; rawInput: string }) => {
         const inputName = rawInput.trim();
+        const session = agent?.session;
         const fallback = defaultModeSource();
-        const current = agent ? modeFromEvents(agent.session.events, fallback) : fallback;
+        const current = session ? modeOf(currentModeOf(session)) : modeOf(fallback);
         if (inputName === "") {
           return { kind: "success", text: current };
         }
@@ -259,7 +259,10 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
             text: `unknown guard mode "${inputName}" (available: ${MODE_IDS.join(", ")})`,
           };
         }
-        if (agent) agent.session.append(MODE_EVENT, { mode: normalized });
+        if (session) {
+          const id = sessionIdOf(session);
+          if (id !== undefined) sessionModes.set(id, normalized);
+        }
         return { kind: "success", text: normalized };
       },
     });
@@ -274,8 +277,7 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
     if (typeof command !== "string" || command.trim().length === 0) return next();
 
     const preview = previewCommand(command, config.maxCommandPreviewBytes);
-    const fallback = defaultModeSource();
-    const mode = exec.agent ? modeFromEvents(exec.agent.session.events, fallback) : fallback;
+    const mode = modeOf(currentModeOf(exec.agent?.session));
 
     try {
       const decision = await decide(ctx, exec, command, mode);
@@ -286,16 +288,13 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
         }
         case "ask": {
           log("warn", `ask   ${exec.name} ${JSON.stringify(preview)}（mode=${mode}：${decision.reason ?? ""}）`);
-          // 走 UI 确认卡片：向用户询问是否继续执行，并阻塞本次调用
-          const outcome = await askUserViaUi(ctx, exec, decision);
-          if (outcome === "allow") return next();
-          const byUser = outcome === "deny";
-          const reasonText = byUser
-            ? decision.reason ?? "用户拒绝了命令审核"
-            : `${decision.reason ?? "命令审核"}；且无法弹窗向用户确认（无 UI 或调用方不受支持），已阻止执行`;
+          // 返回 ask 决策，由 harness 的 approval seam（dsh-user-approval，
+          // dsh-tools serviceAsk）在 agent 作用域弹原生批准框并等待用户。
+          // 不要在此处自行调用 userQuestions/阻塞 IO：profile 级插件
+          // 上下文取不到会话级 UI 服务，会导致"无法弹窗"而 fail closed。
           return {
-            kind: "deny",
-            reason: buildDenyReason({ command: preview, reason: reasonText, byUser }),
+            kind: "ask",
+            reason: `命令审核：${decision.reason ?? "风险命令需要确认"}。命令：${JSON.stringify(preview)}。请确认是否允许执行。`,
           };
         }
         case "deny": {
@@ -330,7 +329,7 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
     });
 
     // 命中达到 denyMinLevel 的规则（默认 critical 级）：
-    // directDeny=true → 直接拒绝；否则一律转 UI 询问
+    // directDeny=true → 直接拒绝；否则一律转为 ask 决策
     // （这是安全底线，不交给 agent 放行）
     if (ruleDecision.kind === "deny") {
       if (config.directDeny) {
@@ -360,7 +359,7 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
     }
 
     // ---- rules 档 ----
-    // 命中达到 askMinLevel 的规则 → 询问
+    // 命中达到 askMinLevel 的规则 → ask（approval seam）
     if (ruleDecision.kind === "ask") {
       return {
         kind: "ask",
@@ -403,9 +402,9 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
   }
 
   /**
-   * agent 档：把命令交给 agent(LLM) 自审，达到档位阈值 → 询问。
-   * 规则命中（达到 askMinLevel，但未到 denyMinLevel 的 critical）作为上下文
-   * 传给用户卡片；agent 判定不可用时按 config.agentFallback 回落。
+   * agent 档：把命令交给 agent(LLM) 自审，达到档位阈值 → ask。
+   * 规则命中（达到 askMinLevel，但未到 denyMinLevel 的 critical）的说明
+   * 并入 ask reason；agent 判定不可用时按 config.agentFallback 回落。
    */
   async function decideByAgent(
     ctx: HostContext,
@@ -435,7 +434,7 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
         }
         case "rules":
         default: {
-          // 回落规则引擎：命中达到 askMinLevel → 询问；否则放行
+          // 回落规则引擎：命中达到 askMinLevel → ask；否则放行
           if (ruleDecision.kind === "ask" || ruleDecision.kind === "deny") {
             const reason = describeRule(ruleDecision.rule);
             return {
@@ -456,7 +455,7 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
       }
     }
 
-    // agent 判定达到档位阈值 → 询问（卡片内含 agent 的用途/影响说明）
+    // agent 判定达到档位阈值 → ask（reason 内含 agent 的用途/影响说明）
     if (shouldWarnForRisk(mode, review.risk)) {
       const contextRule = ruleDecision.kind !== "allow" && ruleDecision.rule
         ? { ruleLabel: ruleDecision.rule.description, ruleHint: ruleDecision.rule.hint }
@@ -482,39 +481,3 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
   }
 }
 
-/**
- * 通过 userQuestions 在界面弹确认卡片，等待用户选择，阻塞本次调用。
- * @returns "allow"=用户允许；"deny"=用户拒绝；"unavailable"=确认不可用（调用方转 deny）。
- */
-async function askUserViaUi(ctx: HostContext, exec: ExecLike, decision: { detail: string; reason: string }): Promise<"allow" | "deny" | "unavailable"> {
-  const userQuestions = ctx.get("userQuestions") as
-    | { ask(request: Record<string, unknown>): Promise<UserAnswer> }
-    | undefined;
-  const agent = exec.agent;
-  if (userQuestions === undefined || agent === undefined) {
-    // 无 UI provider / 无 agent 上下文：fail closed（调用方转 deny）
-    return "unavailable";
-  }
-  try {
-    const answer = await userQuestions.ask({
-      agent,
-      signal: exec.signal,
-      questions: [{
-        id: `command-guard:${String(exec.callId ?? "call")}`,
-        header: "命令审核",
-        question: "Agent 请求执行一条被判定为有风险的命令，是否允许执行？",
-        detail: decision.detail,
-        options: [
-          { label: UI_OPTIONS.allow, description: "仅允许本次调用执行" },
-          { label: UI_OPTIONS.deny, description: "不执行；Agent 会收到提示并调整命令" },
-        ],
-      }],
-    });
-    const selected = answer?.answers?.[0]?.selected;
-    if (Array.isArray(selected) && selected.includes(UI_OPTIONS.allow)) return "allow";
-    return "deny";
-  } catch (error) {
-    ctx.logger.warn(`[command-guard] 用户确认不可用：${error instanceof Error ? error.message : String(error)}`);
-    return "unavailable";
-  }
-}
