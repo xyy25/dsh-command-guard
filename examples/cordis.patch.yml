@@ -24,3 +24,26 @@
           enabled: false
           timeoutMs: 15000
           allowOnFailure: true
+
+# ---------------------------------------------------------------------------
+# （可选）"帮我批准（命令审核）"权限预设：Full access 文件能力 + approval ask，
+# 由 command-guard 放行低风险命令、仅检测到的风险命令弹窗询问（见 README 对应小节）。
+# 以完整表覆盖 permission entry 的 presets（保留原三项 + 新增 guarded）。
+# ---------------------------------------------------------------------------
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+      guarded:
+        sandbox: danger-full-access
+        approval: ask
+        name: 帮我批准（命令审核）
+        description: Full access + 自动命令审核：仅检测到的风险命令请求批准

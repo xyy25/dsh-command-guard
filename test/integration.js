@@ -45,6 +45,19 @@ function quietLogger() {
   };
 }
 
+/** 构造一个返回固定用户选择（可附带 custom 输入框文本）的 userQuestions stub。 */
+function makeUi(selected, custom) {
+  return {
+    ask: async (request) => ({
+      answers: [{
+        id: request.questions[0].id,
+        selected: [selected],
+        ...(custom !== undefined ? { custom } : {}),
+      }],
+    }),
+  };
+}
+
 /** 构造一个 llm stream stub，文本内容来自 content()。 */
 function makeLlm(text) {
   const stream = async function* () {
@@ -285,6 +298,77 @@ test("agent 档 critical 规则（rm -rf /）即使 llm 判 safe 也仍要求确
   const decision = await run(ctx, makeExec({ agent: makeAgent(), arguments: { command: "rm -rf /", description: "x" } }));
   assert.equal(decision.kind, "ask");
   assert.match(decision.reason, /根目录|删除/);
+});
+
+// ===================== 自绘确认卡（userQuestions guard-review 双通道主路径） =====================
+
+test("确认卡：用户点允许 → 放行", async () => {
+  const ctx = await load({ enabled: true, tools: ["pwsh"] }, { userQuestions: makeUi("允许执行") });
+  const decision = await run(ctx, makeExec({ agent: makeAgent(), arguments: { command: "Remove-Item src/main.js", description: "x" } }));
+  assert.equal(decision.kind, "allow");
+});
+
+test("确认卡：用户拒绝（无输入）→ deny 且原因含拒绝语义", async () => {
+  const ctx = await load({ enabled: true, tools: ["pwsh"] }, { userQuestions: makeUi("拒绝执行") });
+  const decision = await run(ctx, makeExec({ agent: makeAgent(), arguments: { command: "Remove-Item src/main.js", description: "x" } }));
+  assert.equal(decision.kind, "deny");
+  assert.match(decision.reason, /被用户拒绝|用户拒绝了命令审核/);
+});
+
+test("确认卡：输入框提交 → deny 且原因含用户希望", async () => {
+  const ctx = await load({ enabled: true, tools: ["pwsh"] }, { userQuestions: makeUi("拒绝执行", "请改用安全的方式删除") });
+  const decision = await run(ctx, makeExec({ agent: makeAgent(), arguments: { command: "Remove-Item src/main.js", description: "x" } }));
+  assert.equal(decision.kind, "deny");
+  assert.match(decision.reason, /被用户拒绝|用户拒绝了命令审核/);
+  assert.match(decision.reason, /用户希望：请改用安全的方式删除/);
+});
+
+test("确认卡：harness 提交约定（selected 置空 + custom）→ deny 且原因含用户希望", async () => {
+  // 单选问答校验要求 custom 与 selected 互斥；插件提交按钮只发 selected:[] + custom。
+  const ctx = await load({ enabled: true, tools: ["pwsh"] }, {
+    userQuestions: {
+      ask: async (request) => ({
+        answers: [{ id: request.questions[0].id, selected: [], custom: "请只读不要删除" }],
+      }),
+    },
+  });
+  const decision = await run(ctx, makeExec({ agent: makeAgent(), arguments: { command: "Remove-Item src/main.js", description: "x" } }));
+  assert.equal(decision.kind, "deny");
+  assert.match(decision.reason, /用户希望：请只读不要删除/);
+});
+
+test("确认卡：宿主发出的问题是 guard-review intent，detail 含命令与规则说明", async () => {
+  let seen = null;
+  const ctx = await load({ enabled: true, tools: ["pwsh"] }, {
+    userQuestions: {
+      ask: async (request) => {
+        seen = request.questions[0];
+        return { answers: [{ id: request.questions[0].id, selected: ["允许执行"] }] };
+      },
+    },
+  });
+  const command = "Remove-Item -Recurse -Force ./build";
+  const decision = await run(ctx, makeExec({ agent: makeAgent(), arguments: { command, description: "x" } }));
+  assert.equal(decision.kind, "allow");
+  assert.ok(seen, "宿主应通过 userQuestions.ask 发问题");
+  assert.equal(seen.intent?.kind, "guard-review", "intent 应为 guard-review 以命中插件自绘卡");
+  assert.ok(seen.detail.includes(command), "detail 必须含完整命令");
+  assert.ok(seen.detail.includes("递归强制删除"), "detail 必须含规则说明");
+  assert.ok((seen.options ?? []).some((option) => option.label === "允许执行"), "选项须含允许");
+  assert.ok((seen.options ?? []).some((option) => option.label === "拒绝执行"), "选项须含拒绝");
+});
+
+test("确认卡不可用（provider 抛错）→ 回落 ask 决策（approval seam）", async () => {
+  const ctx = await load({ enabled: true, tools: ["pwsh"] }, {
+    userQuestions: {
+      ask: async () => {
+        throw new Error("NO_PROVIDER");
+      },
+    },
+  });
+  const decision = await run(ctx, makeExec({ agent: makeAgent(), arguments: { command: "Remove-Item src/main.js", description: "x" } }));
+  assert.equal(decision.kind, "ask");
+  assert.match(decision.reason, /命令审核/);
 });
 
 // ===================== runner =====================

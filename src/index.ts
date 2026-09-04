@@ -3,11 +3,18 @@
 // 能力：监听 `tools/pre-execute` waterfall，在 agent 调用 shell 类工具
 // （默认 pwsh / bash）之前自动审核 `command` 参数。
 //
-// 风险命令一律返回 `{ kind: "ask", reason }` 决策，由 harness 的
-// `tools/pre-execute` approval seam（`dsh-user-approval`，web/terminal UI
-// 原生弹批准框）询问用户：允许才放行本次调用，拒绝则 harness 返回 deny，
-// 无 approval 通道时由平台 fail closed 拒绝。除非启用 directDeny 硬拦截
-// 底线（命中达到 denyMinLevel 直接 `{ kind: "deny" }`）。
+// 风险命令的询问采用"插件自绘确认卡优先、harness approval seam 兜底"
+// 双通道：
+//   - 优先：通过 `ctx.userQuestions.ask`（guard-review intent）弹**本插件
+//     client 自绘的警告卡**（与沙箱拦截同款样式；右下角按钮一次点击生效；
+//     左侧输入框有内容时"拒绝"变"提交"，文本作为"用户希望…"随拒绝返回）。
+//     UI 与接管（GuardApprovalCard / conversation.composer）都在本插件
+//     client bundle 内，不依赖改 dsh 源码。
+//   - 回落：自绘卡不可用（无 userQuestions provider / 非 live root agent /
+//     子代理 / 用户取消 / 异常）时，返回 `{ kind: "ask", reason }` 交给
+//     harness approval seam（`dsh-user-approval`）弹原生批准框或按策略
+//     拒绝，绝不放行未确认的风险命令。除非启用 directDeny 硬拦截底线
+//     （命中达到 denyMinLevel 直接 `{ kind: "deny" }`）。
 //
 // 审核档位（见 ./modes.ts）：
 //   - rules（默认）           —— 硬规则引擎自动判定，命中达到阈值 → ask
@@ -24,11 +31,6 @@
 // persistence 会以 SessionFormatUnsupportedError 拒绝整份日志（除非事件带
 // `ignorable: true`，而 append() 并不开放该标记）。因此会话档位只在
 // 本进程内记忆，不做跨重启持久化。
-//
-// 询问机制也不要绕道 `ctx.userQuestions.ask`：该服务注册在 agent/会话
-// 作用域，profile 级插件上下文通常取不到（结果为"无法弹窗"并 fail
-// closed）。正确做法是让 listener 返回 ask 决策，由 dsh-tools 在正确的
-// 作用域里路由到 approval seam。
 
 import z from "@deepseek-ai/schemastery";
 import { DEFAULT_ALLOW_COMMANDS, DEFAULT_RULES, type RuleDef } from "./rules.js";
@@ -43,6 +45,12 @@ export const inject = ["tools"];
 
 /** settings 命名空间：默认档位（新会话）。 */
 const MODE_SETTINGS_NS = "commandGuard";
+
+/** 自绘确认卡上的选项文案（一次点击生效；拒绝侧输入框有内容时变"提交"）。 */
+const UI_OPTIONS = Object.freeze({
+  allow: "允许执行",
+  deny: "拒绝执行",
+});
 
 /**
  * 运行配置（结构定义见 Config）。apply 收到的是经 z 校验后的值。
@@ -288,10 +296,22 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
         }
         case "ask": {
           log("warn", `ask   ${exec.name} ${JSON.stringify(preview)}（mode=${mode}：${decision.reason ?? ""}）`);
-          // 返回 ask 决策，由 harness 的 approval seam（dsh-user-approval，
-          // dsh-tools serviceAsk）在 agent 作用域弹原生批准框并等待用户。
-          // 不要在此处自行调用 userQuestions/阻塞 IO：profile 级插件
-          // 上下文取不到会话级 UI 服务，会导致"无法弹窗"而 fail closed。
+          // 1) 优先：插件自绘确认卡（与沙箱拦截同款警告样式 + 输入框：
+          //    有内容时"拒绝"变"提交"，文本作为"用户希望…"随拒绝回传）。
+          //    UI 与接管都在本插件 client（GuardApprovalCard / guard-review）。
+          try {
+            const outcome = await askViaGuardCard(ctx, exec, decision);
+            if (outcome.action === "allow") return next();
+            const customHint = outcome.custom !== undefined ? `；用户希望：${outcome.custom}` : "";
+            return {
+              kind: "deny",
+              reason: `命令审核被用户拒绝${customHint}。命令：${JSON.stringify(preview)}。`,
+            };
+          } catch (error) {
+            ctx.logger.warn(`[command-guard] 确认卡不可用，回落 harness approval seam：${error instanceof Error ? error.message : String(error)}`);
+          }
+          // 2) 回落：返回 ask 决策，由 harness approval seam（dsh-user-approval /
+          //    dsh-tools serviceAsk）弹原生批准框；approval 策略 never 时直接拒绝。
           return {
             kind: "ask",
             reason: `命令审核：${decision.reason ?? "风险命令需要确认"}。命令：${JSON.stringify(preview)}。请确认是否允许执行。`,
@@ -479,5 +499,53 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
 
     return { kind: "allow" };
   }
+}
+
+/** userQuestions 应答的宽松面（selected=一次点击选项；custom=输入框"提交"文本）。 */
+interface UserAnswerLike {
+  answers?: { id?: unknown; selected?: unknown[]; custom?: unknown }[];
+}
+
+/**
+ * 通过 userQuestions seam 弹插件的自绘确认卡（GuardApprovalCard），等待用户
+ * 一次点击（允许执行 / 拒绝执行）或"提交"（拒绝 + 输入框文本）。
+ * 仅当存在 UI provider 且调用方是 live root agent 时可用；任何不可用或
+ * 异常都向上抛，由 ask 分支统一记录并回落 harness approval seam。
+ */
+async function askViaGuardCard(
+  ctx: HostContext,
+  exec: ExecLike,
+  decision: { detail: string; reason: string },
+): Promise<{ action: "allow" } | { action: "deny"; custom?: string }> {
+  const userQuestions = ctx.get("userQuestions") as
+    | { ask(request: Record<string, unknown>): Promise<UserAnswerLike> }
+    | undefined;
+  const agent = exec.agent;
+  if (userQuestions === undefined || agent === undefined) {
+    throw new Error("no user-questions provider or no agent context");
+  }
+  const answer = await userQuestions.ask({
+    agent,
+    signal: exec.signal,
+    questions: [{
+      id: `command-guard:${String(exec.callId ?? "call")}`,
+      header: "命令审核",
+      question: "Agent 请求执行一条被判定为有风险的命令，是否允许执行？",
+      detail: decision.detail,
+      // intent 让客户端把该请求渲染为插件的自绘确认卡（GuardApprovalCard），
+      // 而非通用问答流。userQuestions.ask 会校验 approve 标签确有一个同名
+      // option，且声明 intent 时 detail 必须存在。
+      intent: { kind: "guard-review", approve: UI_OPTIONS.allow },
+      options: [
+        { label: UI_OPTIONS.allow, description: "仅允许本次调用执行" },
+        { label: UI_OPTIONS.deny, description: "不执行；Agent 会收到提示并调整命令" },
+      ],
+    }],
+  });
+  const selected = answer?.answers?.[0]?.selected;
+  const rawCustom = answer?.answers?.[0]?.custom;
+  const custom = typeof rawCustom === "string" && rawCustom.trim() !== "" ? rawCustom.trim() : undefined;
+  if (Array.isArray(selected) && selected.includes(UI_OPTIONS.allow)) return { action: "allow" };
+  return custom === undefined ? { action: "deny" } : { action: "deny", custom };
 }
 

@@ -316,8 +316,10 @@ function GuardApprovalCard({ matched }) {
             return;
         setBusy(true);
         try {
+            // harness 单选校验：custom 与 selected 不能同时携带（matchesQuestions）。
+            // 提交（拒绝 + 留言）只发 custom（selected 置空）；点选项才发 selected。
             await pending.answer({
-                answers: [{ id: question.id, selected: [label], ...(custom !== undefined ? { custom } : {}) }],
+                answers: [{ id: question.id, ...(custom !== undefined ? { selected: [], custom } : { selected: [label] }) }],
             });
         }
         catch {
