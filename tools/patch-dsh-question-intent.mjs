@@ -1,24 +1,20 @@
-// dsh-command-guard —— dsh 安装后处理脚本：为 harness 的 userQuestions wire schema
-// 补上 guard-review intent 白名单（方案 A 的最小契约扩展）。
+// dsh-command-guard —— dsh 安装后处理脚本：为旧版（v0.1.1-rc.x）harness 的
+// userQuestions wire schema 补上 guard-review intent 白名单。
 //
-// 为什么需要：插件自绘“命令审核”确认卡依赖宿主发送 intent.kind = "guard-review"
-// 的问题；而 harness 把该帧的 intent 限定为只允许 "plan-review"
-// （dsh-client-connection 与 dsh-host-apiproxy 两处 zod discriminatedUnion）。
-// 未知 intent 会在浏览器端解码时被整帧丢弃（控制台可见
-// `dropping malformed WebSocket frame ... ZodError ... options: ["plan-review"]`），
-// 表现为不弹卡、宿主 ask 挂起（转圈）。本脚本给两处 union 各追加一个
-// guard-review 成员（不触碰其它逻辑；plan-review 不受影响）。
+// 为什么（旧版才需要）：v0.1.1 的 dsh-client-connection / dsh-host-apiproxy 在
+// 解码 question 帧时把 intent.kind 限定为只允许 "plan-review"，未知 intent
+// （guard-review）会让整帧被浏览器丢弃（控制台 ZodError），表现为命令被判定
+// 风险后不弹卡、宿主 ask 挂起转圈。
+//
+// v0.1.2 起 harness 已移除该帧级 intent 白名单（不再有 plan-review zod union），
+// guard-review 帧可直接通过，因此**新版不需要本补丁**——脚本会自动检测：
+// 两个目标文件不存在（或不再含 plan-review 锁）时，打印提示并正常退出。
 //
 // 用法：
 //   node tools/patch-dsh-question-intent.mjs --dsh "E:\\nvm\\v24.14.1\\node_modules\\@deepseek-ai\\dsh"
-//   node tools/patch-dsh-question-intent.mjs --dsh <dsh-root> --undo   # 回滚
+//   node tools/patch-dsh-question-intent.mjs --dsh <dsh-root> --undo   # 回滚（v0.1.1）
 //
-// 行为：
-//   - 幂等：目标文件已含 guard-review 时跳过；
-//   - 每次真实修改前先备份为 <file>.bak-intent-guard-review（不覆盖既有备份）；
-//   - 完成后用 node --check 校验改动文件语法。
-// 生效：重启 dsh（host 与浏览器都重新加载 bundle）。
-// dsh 升级后需要重新运行本脚本（备份文件可帮助确认旧改动）。
+// 行为：幂等；真实修改前备份 <file>.bak-intent-guard-review；改后 node --check。
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
@@ -38,7 +34,6 @@ function parseArgs(argv) {
   return args;
 }
 
-/** 常见候选（按需用 --dsh 精确指定；候选仅用于减少输入）。 */
 function candidateRoots() {
   const list = [];
   if (process.env.DSH_ROOT) list.push(process.env.DSH_ROOT);
@@ -85,6 +80,14 @@ function targets() {
   ];
 }
 
+/** v0.1.2+ 已移除 intent 白名单：目标文件不存在或已不含 plan-review 锁即视为无需补丁。 */
+function needsLegacyPatch(root) {
+  const conn = join(root, "node_modules", "@deepseek-ai", "dsh-client-connection", "lib", "client.js");
+  if (!existsSync(conn)) return false;
+  const text = readFileSync(conn, "utf8");
+  return text.includes('literal("plan-review")') || text.includes("literal('plan-review')");
+}
+
 function patchFile(file, oldText, newText) {
   if (!existsSync(file)) return { file, status: "missing" };
   const text = readFileSync(file, "utf8");
@@ -116,6 +119,11 @@ function syntaxCheck(file) {
 const args = parseArgs(process.argv);
 const root = locateDshRoot(args.dsh);
 console.log(`dsh root: ${root}`);
+if (!needsLegacyPatch(root)) {
+  console.log("检测到新版（v0.1.2+）结构：question intent 白名单已放开，guard-review 无需补丁。");
+  console.log("本脚本保留用于旧版（v0.1.1-rc.x）安装；如确需对旧版执行，请 --dsh 指向旧版安装目录。");
+  process.exit(0);
+}
 let changed = 0;
 for (const { rel, old, next } of targets()) {
   const file = join(root, rel);

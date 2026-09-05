@@ -1,29 +1,55 @@
-// dsh-command-guard 客户端 UI（web profile 的 client half）。
+// dsh-command-guard 客户端 UI 源码（dsh v0.1.2+ 适配版）。
 //
-// 源码为 TSX（含 React/DOM），经 npm run build：
-//   tsc 编译为 CJS 单文件 → build/bundle-client.mjs 包成
-//   window.__ModuleLoader__.load({ id, factory }) 外壳 → 写入 client/client.js。
-//
-// 职责：
-//   1. 为宿主 /guard 命令装饰弹层：斜杠菜单选中或裸输入 "/guard" 回车 →
-//      弹出档位下拉（popupSelect）。
-//   2. 设置页 General 区"权限"行下方注册"命令审核"行：读写 host settings
-//      namespace "commandGuard" 的 mode（新会话默认档位）。
-//   3. 输入框工具栏（conversation.input.left）注册常驻"命令审核"下拉：
-//      点开即见五档并可切换当前会话档位。
-//
-// 档位机器值与 lib/modes.ts 保持一致（client 是独立产物不能 import host 模块）。
-
+// 说明：
+//   - 本文件是唯一客户端源码；产物 client/client.js 由 `npm run build`
+//     （tsc -p src/client/tsconfig.json → build/bundle-client.mjs）生成。
+//   - dsh v0.1.2 起客户端为 "module table + 平台 seed" 机制：本插件 client 只能
+//     require 平台 seed（react、@deepseek-ai/dsh-client-ui-primitives），并依赖
+//     客户端 cordis 服务（slots/sessions/commandUi）。构建机需安装 seed devDeps
+//     （react、@types/react、@deepseek-ai/dsh-client-ui-primitives）。
+//   - 功能：
+//     1) conversation.composer：接管 intent.kind === "guard-review" 的 pending，
+//        渲染自绘确认卡（一次点击允许/拒绝；输入框有内容时拒绝变"提交"，文本以
+//        selected:[] + custom 回传——harness 单选约定 custom 与 selected 互斥）。
+//     2) conversation.input.left：输入区"命令审核"按钮（当前会话档位下拉）。
+//     3) commandUi：/guard 命令装饰（输入 /guard 时弹出档位选择）。
 import * as React from "react";
-import { Menu, IconChevronDownOutline14, MarkdownText, Button } from "@deepseek-ai/dsh-client-ui-primitives";
-import { createSnapshotStore } from "@deepseek-ai/dsh-client-runtime/client";
-import { PendingQuestion } from "@deepseek-ai/dsh-client-ui-user-questions";
 
-// ---------------------------------------------------------------------------
-// 样式：与官方权限行一致的视觉。样式以字符串注入 <style>（无 CSS 构建链）。
-// ---------------------------------------------------------------------------
+// ---- 运行时平台 seed（构建时保留为外部 require；值经 import React 提供）----
+declare const require: (spec: string) => any;
 
-/** 若尚未注入则把一段 CSS 挂到 <head>（幂等）。 */
+// ---------------------------------------------------------------
+// 样式：确认卡与输入区按钮（字符串注入 <style>）。
+// ---------------------------------------------------------------
+const STYLE_ID = "dsh-command-guard/GuardCard.module.css";
+const CARD_CSS = [
+  ".cga_root{padding:8px calc(var(--dsh-composer-side-clearance,16px)+12px) 12px;flex-direction:column;align-items:center;display:flex}",
+  ".cga_card{width:100%;max-width:var(--dsh-chat-content-width,760px);border:1px solid var(--dsw-alias-state-warn-secondary);background:var(--dsw-specific-input-major);border-radius:20px;overflow:hidden}",
+  ".cga_strip{background:var(--dsw-alias-state-warn-tertiary);color:var(--dsw-alias-state-warn-primary);align-items:center;gap:8px;padding:10px 16px;font-size:13px;line-height:18px;display:flex}",
+  ".cga_dot{background:var(--dsw-alias-state-warn-primary);border-radius:50%;width:8px;height:8px}",
+  ".cga_body{max-height:240px;flex-direction:column;gap:6px;padding:12px 16px 0;display:flex;overflow:auto}",
+  ".cga_meta{color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;white-space:pre-wrap}",
+  ".cga_actionRow{justify-content:flex-end;align-items:center;gap:8px;padding:14px 16px;display:flex}",
+  ".cga_input{flex:1;min-width:0;height:34px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;padding:0 10px}",
+  ".cga_input:focus{outline:none;border-color:var(--dsw-alias-interactive-accent)}",
+  ".cga_btn{height:34px;border:1px solid var(--dsw-alias-border-l2);border-radius:18px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;padding:0 14px;cursor:pointer;flex:none}",
+  ".cga_btnPrimary{background:var(--dsw-alias-interactive-accent);border-color:var(--dsw-alias-interactive-accent);color:var(--dsw-alias-label-on-accent)}",
+  ".cga_btn:disabled{opacity:.55;cursor:default}",
+  ".cga_btnReject:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);border-color:transparent}",
+].join("");
+
+const ZONE_STYLE_ID = "dsh-command-guard/GuardZone.module.css";
+// 样式与旧版（v0.1.1）一致：圆形"仅图标"按钮 + 向上弹层 + 错误标记。
+const ZONE_CSS = [
+  ".cgZn_selector{background:var(--dsw-alias-bg-module-platform);width:28px;height:28px;font:inherit;color:var(--dsw-alias-label-primary);cursor:pointer;border:none;border-radius:14px;align-items:center;justify-content:center;gap:0;padding:0;font-size:13px;line-height:20px;display:inline-flex}",
+  ".cgZn_selector:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}",
+  ".cgZn_selector:disabled{cursor:default}.cgZn_chevron{flex:none}",
+  ".cgZn_error{color:var(--dsw-alias-state-error-primary);font-weight:700;margin-right:4px}",
+  ".cgZn_popover{background:var(--dsw-specific-input-major);border:1px solid var(--dsw-alias-border-l2-darkmode-thin);border-radius:12px;box-shadow:var(--dsw-shadow-lv2);color:var(--dsw-alias-label-primary);padding:6px;z-index:1200}",
+  ".cgZn_popover [role=menuitem]:hover{background:var(--dsw-alias-interactive-bg-hover)}",
+  ".cgZn_popoverActive{background:var(--dsw-alias-interactive-bg-hover);font-weight:600}",
+].join("");
+
 function injectStyle(tagId: string, css: string): void {
   if (typeof document === "undefined") return;
   if (document.querySelector(`style[data-plugin-css=${JSON.stringify(tagId)}]`) !== null) return;
@@ -34,206 +60,172 @@ function injectStyle(tagId: string, css: string): void {
   document.head.appendChild(tag);
 }
 
-/** 设置行样式。 */
-const ROW_CSS =
-  ".oY77xG_row{border-bottom:1px solid var(--dsw-alias-border-l2);align-items:center;gap:8px;padding:16px 0;display:flex}" +
-  ".oY77xG_rowText{flex-direction:column;flex:1;gap:4px;min-width:0;padding-right:48px;display:flex}" +
-  ".oY77xG_title{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:400;line-height:22px}" +
-  ".oY77xG_desc{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400;line-height:18px}" +
-  ".oY77xG_selector{background:var(--dsw-alias-bg-module-platform);height:36px;font:inherit;color:var(--dsw-alias-label-primary);cursor:pointer;border:none;border-radius:18px;align-items:center;gap:12px;padding:0 14px;font-size:14px;line-height:22px;display:inline-flex}" +
-  ".oY77xG_selector:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}" +
-  ".oY77xG_selector:disabled{cursor:default}.oY77xG_chevron{flex:none}";
-
-const ROW_CLASSES = Object.freeze({
-  row: "oY77xG_row",
-  rowText: "oY77xG_rowText",
-  title: "oY77xG_title",
-  desc: "oY77xG_desc",
-  selector: "oY77xG_selector",
-  chevron: "oY77xG_chevron",
-});
-
-/** 输入区按钮样式。 */
-const ZONE_CSS =
-  ".cgZn_selector{background:var(--dsw-alias-bg-module-platform);width:28px;height:28px;font:inherit;color:var(--dsw-alias-label-primary);cursor:pointer;border:none;border-radius:14px;align-items:center;justify-content:center;gap:0;padding:0;font-size:13px;line-height:20px;display:inline-flex}" +
-  ".cgZn_selector:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}" +
-  ".cgZn_selector:disabled{cursor:default}.cgZn_chevron{flex:none}" +
-  ".cgZn_error{color:var(--dsw-alias-state-error-primary);font-weight:700;margin-right:4px}" +
-  ".cgZn_popover{background:var(--dsw-specific-input-major);border:1px solid var(--dsw-alias-border-l2-darkmode-thin);border-radius:12px;box-shadow:var(--dsw-shadow-lv2);color:var(--dsw-alias-label-primary);padding:6px;z-index:1200}" +
-  ".cgZn_popover [role=menuitem]:hover{background:var(--dsw-alias-interactive-bg-hover)}" +
-  ".cgZn_popoverActive{background:var(--dsw-alias-interactive-bg-hover);font-weight:600}";
-
-const ZONE_CLASSES = Object.freeze({
-  selector: "cgZn_selector",
-  chevron: "cgZn_chevron",
-  error: "cgZn_error",
-  popover: "cgZn_popover",
-  popoverActive: "cgZn_popoverActive",
-});
-
-injectStyle("dsh-command-guard/GuardModeRow.module.css", ROW_CSS);
-injectStyle("dsh-command-guard/GuardZone.module.css", ZONE_CSS);
-
-// ---------------------------------------------------------------------------
-// 档位静态选项（设置行下拉、/guard 弹层、输入区按钮共用）。
-// ---------------------------------------------------------------------------
-
-interface ModeOption {
-  id: string;
-  label: string;
-  detail?: string;
-}
-
-const MODE_OPTIONS: ModeOption[] = [
-  { id: "rules", label: "硬规则判定", detail: "规则引擎按配置自动判定（现有行为）；命中即向你确认" },
+// ---------------------------------------------------------------
+// 档位镜像（与 lib/modes.ts 一致；client 独立产物不能 import host 模块）。
+// detail 用于弹层条目的悬浮说明；MODE_ICON 描述"仅图标"按钮的盾形样式。
+// ---------------------------------------------------------------
+const GUARD_MODES = [
+  { id: "rules", label: "硬规则判定", detail: "规则引擎按配置自动判定；命中即向你确认" },
   { id: "agent-very-loose", label: "Agent 判定 · 极宽松", detail: "仅当 agent 判定为 critical（不可逆破坏）时才确认" },
   { id: "agent-loose", label: "Agent 判定 · 宽松", detail: "agent 判定为 high 及以上（明显破坏性）时确认" },
   { id: "agent-standard", label: "Agent 判定 · 标准", detail: "agent 判定为 medium 及以上（有副作用）时确认" },
   { id: "agent-strict", label: "Agent 判定 · 严格", detail: "agent 判定为 low 及以上（存疑即确认），仅明显安全的命令放行" },
 ];
-
-// ---------------------------------------------------------------------------
-// 设置行（General 区，"权限"行正下方）
-// ---------------------------------------------------------------------------
-
-interface GuardModeRowProps {
-  /** 行保存动作（写 commandGuard.mode）。 */
-  select(mode: string): void;
-  /** 首次渲染加载（读 mirror）。 */
-  load(): void;
-  /** 由注入面 hooks.guardMode 绑定的 store 快照 hook。 */
-  useGuardMode?: (selector: (snapshot: unknown) => unknown) => unknown;
-  /** 行字典翻译。 */
-  t(key: string): string;
+function labelOf(modeId: string): string {
+  return GUARD_MODES.find((entry) => entry.id === modeId)?.label ?? modeId;
 }
-
-function GuardModeRow({ load, select, useGuardMode, t }: GuardModeRowProps) {
-  const state = (useGuardMode ? useGuardMode((snapshot: any) => snapshot) : null) as any;
-  const [open, setOpen] = React.useState(false);
-  React.useEffect(() => {
-    load();
-  }, [load]);
-  React.useEffect(() => {
-    if (state?.writable && state?.status !== "unavailable") return;
-    setOpen(false);
-  }, [state?.status, state?.writable]);
-
-  if (state == null || state.status === "unavailable") return null;
-
-  const selected = state.options?.find((option: any) => option.id === state.currentValue);
-  const busy = state.status === "loading" || state.status === "saving";
-  const label = selected?.label ?? (busy ? t("loading") : t("unavailable"));
-  const description = state.error ?? t("description");
-
-  return (
-    <>
-      <div className={ROW_CLASSES.row}>
-        <div className={ROW_CLASSES.rowText}>
-          <div className={ROW_CLASSES.title}>{t("title")}</div>
-          <div className={ROW_CLASSES.desc} role={state.error === null ? undefined : "alert"}>
-            {description}
-          </div>
-        </div>
-        <Menu
-          open={open}
-          onClose={() => setOpen(false)}
-          items={(state.options ?? []).map((option: any) => ({ id: option.id, label: option.label }))}
-          selectedId={state.currentValue}
-          onSelect={(id: string) => {
-            setOpen(false);
-            if (id === state.currentValue) return;
-            select(id);
-          }}
-          align="end"
-          portal
-          anchor={
-            <button
-              type="button"
-              className={ROW_CLASSES.selector}
-              aria-haspopup="menu"
-              aria-expanded={open}
-              disabled={busy || !state.writable || state.options?.length === 0}
-              onClick={() => setOpen((value) => !value)}
-            >
-              {label}
-              <IconChevronDownOutline14 className={ROW_CLASSES.chevron} />
-            </button>
-          }
-        />
-      </div>
-    </>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// 输入区常驻档位下拉（conversation.input.left 条目）
-// ---------------------------------------------------------------------------
-
-/** 输入区按钮固定标题（zone 条目没有 locale 机制，与档位选项一致固定中文）。 */
-const ZONE_LABEL = "命令审核";
-
-/** 档位 → 图标状态：颜色（按阈值由浅到深）+ 符号（rules 用字母，agent 档用点数 1–4）。 */
-const MODE_ICON: Record<string, { color: string; dotCount: number; letter?: string }> = Object.freeze({
+// 档位 → 图标状态：颜色（按阈值由浅到深）+ 符号（rules 用字母，agent 档用点数 1–4）。
+const MODE_ICON: Record<string, { color: string; dotCount: number; letter?: string }> = {
   rules: { color: "#8ab4f8", dotCount: 0, letter: "R" },
   "agent-very-loose": { color: "#7fd4a0", dotCount: 1 },
   "agent-loose": { color: "#f2c14e", dotCount: 2 },
   "agent-standard": { color: "#f39a4b", dotCount: 3 },
   "agent-strict": { color: "#e0574f", dotCount: 4 },
-});
-
-/** 盾形守卫图标：模式状态用颜色 + 符号区分，供"仅图标"按钮使用。 */
+};
+/** 盾形守卫图标（仅图标按钮与弹层条目共用）。 */
 function ShieldIcon({ mode }: { mode: string }) {
   const conf = MODE_ICON[mode] ?? MODE_ICON.rules;
-  const dots: number[] = [];
+  const dots = [];
   for (let i = 0; i < conf.dotCount; i += 1) dots.push(i);
   return (
     <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
       <path d="M8 1.2L13.8 3v4.1c0 3.9-2.3 6.7-5.8 7.8C4.5 13.8 2.2 11 2.2 7.1V3z" fill={conf.color} />
-      {conf.letter
-        ? (
-          <text x="8" y="11" textAnchor="middle" fontSize="7" fontWeight="700" fill="#0b1220" style={{ userSelect: "none" }}>
-            {conf.letter}
-          </text>
-        )
-        : dots.map((i) => (
+      {conf.letter !== undefined ? (
+        <text x="8" y="11" textAnchor="middle" fontSize="7" fontWeight="700" fill="#0b1220" style={{ userSelect: "none" }}>
+          {conf.letter}
+        </text>
+      ) : (
+        dots.map((i) => (
           <circle key={i} cx={8 - (conf.dotCount - 1) * 1.7 + i * 3.4} cy="8.6" r="1.1" fill="#0b1220" />
-        ))}
+        ))
+      )}
     </svg>
   );
 }
 
-interface GuardZoneProps {
-  /** owner 提供的会话快照（InputZone.session）。 */
-  session?: { sessionId?: string } | null;
-  /** 注入：执行一次档位切换（走宿主 /guard <mode>）。 */
-  pickMode?(sessionId: string, mode: string): Promise<void>;
-  /** 注入：读取当前档位（读 settings 默认档，无任何宿主命令副作用）。 */
-  readDefaultMode?(sessionId?: string): Promise<string | null>;
+// ---------------------------------------------------------------
+// 文案（内置简体中文；不依赖 locale 注册）。
+// ---------------------------------------------------------------
+const LOC = {
+  waiting: "命令审核",
+  headline: "Agent 请求执行一条被判定为有风险的命令，是否允许执行？",
+  placeholder: "如需告诉 Agent 怎么做，可在此输入（提交后随拒绝一并反馈）",
+  submit: "提交",
+  reject: "拒绝",
+  allow: "允许执行",
+  aria: "命令审核详情",
+  zoneHint: "命令审核档位（当前会话）",
+};
+
+// ---------------------------------------------------------------
+// pending question 判定：PendingQuestion 类为官方 bundle 私有，这里鸭子类型。
+// ---------------------------------------------------------------
+interface PendingLike {
+  key: string;
+  questions?: { id: string; intent?: { kind: string; approve?: string }; detail?: string; options?: { label: string; description?: string }[] }[];
+  answer(answer: unknown): unknown;
+}
+function isGuardReview(pending: unknown): pending is PendingLike {
+  if (typeof pending !== "object" || pending === null) return false;
+  const q = (pending as PendingLike).questions?.[0];
+  return q !== undefined && q.intent?.kind === "guard-review";
 }
 
-function GuardZone({ session, pickMode, readDefaultMode }: GuardZoneProps) {
-  const [open, setOpen] = React.useState(false);
+// ---------------------------------------------------------------
+// 确认卡：props.matched = composer 槽选中的 pending question。
+// detail 用纯文本 <pre>（避免 Markdown 组件在槽内渲染引入的不确定性）。
+// ---------------------------------------------------------------
+function GuardApprovalCard(props: { matched?: PendingLike }) {
+  const pending = props.matched;
+  const question = pending?.questions?.[0];
+  const [note, setNote] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  if (!pending || !question) return null;
+  const approveLabel = question.intent?.approve ?? LOC.allow;
+  const denyLabel = question.options?.find((option) => option.label !== approveLabel)?.label ?? LOC.reject;
+  const hasNote = note.trim().length > 0;
+  const commit = (label: string, custom?: string): void => {
+    if (busy) return;
+    setBusy(true);
+    // harness 单选约定：custom 与 selected 互斥；提交（拒绝 + 留言）只带 custom。
+    const answers = [{ id: question.id, ...(custom !== undefined ? { selected: [], custom } : { selected: [label] }) }];
+    Promise.resolve()
+      .then(() => pending.answer({ answers }))
+      .catch(() => setBusy(false));
+  };
+  return (
+    <div className="cga_root" data-guard-approval-key={pending.key}>
+      <div className="cga_card">
+        <div className="cga_strip">
+          <span className="cga_dot" />
+          {LOC.waiting}
+        </div>
+        <div className="cga_body" tabIndex={0} role="group" aria-label={LOC.aria}>
+          {question.detail ? (
+            <pre className="cga_meta">{question.detail}</pre>
+          ) : (
+            <div className="cga_meta">{LOC.headline}</div>
+          )}
+        </div>
+        <div className="cga_actionRow">
+          <input
+            className="cga_input"
+            value={note}
+            disabled={busy}
+            placeholder={LOC.placeholder}
+            aria-label={LOC.placeholder}
+            onChange={(event) => setNote(event.currentTarget.value)}
+          />
+          <button type="button" className="cga_btn cga_btnReject" disabled={busy} onClick={() => commit(denyLabel, hasNote ? note.trim() : undefined)}>
+            {hasNote ? LOC.submit : LOC.reject}
+          </button>
+          <button type="button" className="cga_btn cga_btnPrimary" disabled={busy} onClick={() => commit(approveLabel)}>
+            {LOC.allow}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------
+// 输入区"命令审核"按钮 + 档位下拉。槽位 occupant 的 inject(sessionId) 回调会收到
+// 当前会话 id；组件只依赖注入面（guardApi 已把 sessionId 闭包绑定）。
+// ---------------------------------------------------------------
+interface GuardZoneApi {
+  current(): Promise<string | null>;
+  switchMode(modeId: string): Promise<string>;
+}
+/**
+ * 输入区"命令审核"按钮（样式与旧版一致）：圆形"仅图标"按钮（与"+"号同款），
+ * 用盾形图标的颜色/符号区分档位；点击后弹层**向上**展开，外部点击关闭。
+ * 槽位 occupant 的 inject(sessionId) 回调会收到当前会话 id，guardApi 已闭包绑定。
+ */
+function GuardZone(props: { guardApi?: GuardZoneApi }) {
+  const api = props.guardApi;
   const [current, setCurrent] = React.useState<string | null>(null);
+  const [open, setOpen] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const hostRef = React.useRef<HTMLSpanElement | null>(null);
-  const sessionId = session?.sessionId;
 
-  // 初始档位：读 settings 默认档（不触发宿主命令，避免在会话里产生"guard · …"状态行）
+  // 初始：读当前会话档位。
   React.useEffect(() => {
+    if (!api || typeof api.current !== "function") return;
     let alive = true;
-    if (typeof readDefaultMode === "function") {
-      void readDefaultMode(sessionId).then((mode) => {
-        if (alive && mode !== null) setCurrent(mode);
-      }).catch(() => {
-        /* 读取默认档失败不影响交互 */
+    api
+      .current()
+      .then((value) => {
+        if (alive && typeof value === "string") setCurrent(value);
+      })
+      .catch(() => {
+        /* host 未提供 /guard 时保持默认 */
       });
-    }
     return () => {
       alive = false;
     };
-  }, [readDefaultMode, sessionId]);
+  }, [api]);
 
-  // 点击外部关闭向上弹层
+  // 点击外部关闭向上弹层。
   React.useEffect(() => {
     if (!open) return;
     const onDown = (event: MouseEvent) => {
@@ -243,56 +235,36 @@ function GuardZone({ session, pickMode, readDefaultMode }: GuardZoneProps) {
     return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
 
-  const fail = (where: string, cause: unknown): void => {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    try {
-      console.error(`[dsh-command-guard] GuardZone ${where}:`, cause);
-    } catch {
-      /* console 不可用时静默 */
-    }
-    setError(`${where} 失败：${message}`);
-  };
-
-  const pick = async (id: string): Promise<void> => {
+  if (!api) return null;
+  const currentLabel = current === null ? null : labelOf(current);
+  const pick = (id: string): void => {
     setOpen(false);
-    if (sessionId === undefined) {
-      setError("zone 未提供会话信息（client 装配问题），请改用 /guard 命令");
-      setOpen(true);
-      return;
-    }
-    if (typeof pickMode !== "function") {
-      setError("档位切换通道未注入（client 装配问题），请改用 /guard 命令");
-      setOpen(true);
-      return;
-    }
-    try {
-      await pickMode(sessionId, id);
-      setCurrent(id);
-      setError(null);
-    } catch (cause) {
-      fail("切换档位", cause);
-      setOpen(true);
-    }
+    if (typeof api.switchMode !== "function") return;
+    api
+      .switchMode(id)
+      .then(() => {
+        setCurrent(id);
+        setError(null);
+      })
+      .catch((cause: unknown) => {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        setError(`切换档位失败：${message}`);
+        setOpen(true);
+      });
   };
-
-  const currentLabel = (() => {
-    if (current === null) return null;
-    return MODE_OPTIONS.find((option) => option.id === current)?.label ?? null;
-  })();
-
   return (
     <span ref={hostRef} style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
       {error !== null && (
-        <span className={ZONE_CLASSES.error} title={error} aria-label={error}>
+        <span className="cgZn_error" title={error} aria-label={error}>
           !
         </span>
       )}
       <button
         type="button"
-        className={ZONE_CLASSES.selector}
+        className="cgZn_selector"
         aria-haspopup="menu"
         aria-expanded={open}
-        title={error ?? (currentLabel ? `${ZONE_LABEL}（当前：${currentLabel}）` : ZONE_LABEL)}
+        title={error ?? (currentLabel ? `${LOC.waiting}（当前：${currentLabel}）` : LOC.waiting)}
         onClick={() => setOpen((value) => !value)}
       >
         <ShieldIcon mode={current ?? "rules"} />
@@ -300,26 +272,19 @@ function GuardZone({ session, pickMode, readDefaultMode }: GuardZoneProps) {
       {open && (
         <div
           role="menu"
-          className={ZONE_CLASSES.popover}
-          style={{
-            position: "absolute",
-            bottom: "calc(100% + 6px)",
-            left: "0",
-            minWidth: "200px",
-            maxHeight: "min(320px, 60vh)",
-            overflowY: "auto",
-          }}
+          className="cgZn_popover"
+          style={{ position: "absolute", bottom: "calc(100% + 6px)", left: "0", minWidth: "200px", maxHeight: "min(320px, 60vh)", overflowY: "auto" }}
         >
-          {MODE_OPTIONS.map((option) => {
+          {GUARD_MODES.map((option) => {
             const active = option.id === current;
             return (
               <div
                 key={option.id}
                 role="menuitem"
-                className={active ? ZONE_CLASSES.popoverActive : undefined}
+                className={active ? "cgZn_popoverActive" : undefined}
                 style={{ fontSize: 13, lineHeight: "20px", padding: "8px 12px", cursor: "pointer" }}
                 title={option.detail}
-                onClick={() => void pick(option.id)}
+                onClick={() => pick(option.id)}
               >
                 <ShieldIcon mode={option.id} />
                 <span style={{ marginLeft: 8 }}>{option.label}</span>
@@ -332,477 +297,103 @@ function GuardZone({ session, pickMode, readDefaultMode }: GuardZoneProps) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// 确认卡（approval 风格：一次点击生效 + 可选输入框）
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------
+// 客户端插件主体。
+// ---------------------------------------------------------------
+export const inject = ["slots", "sessions", "commandUi"];
+export function apply(ctx: any): void {
+  injectStyle(STYLE_ID, CARD_CSS);
+  injectStyle(ZONE_STYLE_ID, ZONE_CSS);
+  const sessions = ctx.sessions;
+  const command = ctx.get("commandUi");
 
-/** 确认卡固定文案（composer 条目无 locale 依赖时仍可用；同时提供 zh/en 字典）。 */
-const APPROVAL_LOCALES_ZH = {
-  waiting: "命令审核需确认",
-  placeholder: "（可选）告诉 Agent 希望如何调整",
-  reject: "拒绝执行",
-  submit: "提交",
-  allow: "允许执行",
-};
-const APPROVAL_LOCALES_EN = {
-  waiting: "Command review required",
-  placeholder: "(optional) tell the Agent how to adjust",
-  reject: "Reject",
-  submit: "Submit",
-  allow: "Allow",
-};
-
-const APPROVAL_CSS =
-  ".gzc_root{padding:8px calc(var(--dsh-composer-side-clearance) + 16px) 12px;flex-direction:column;align-items:center;display:flex}" +
-  ".gzc_card{width:100%;max-width:var(--dsh-chat-content-width);border:1px solid var(--dsw-alias-state-warn-secondary);background:var(--dsw-specific-input-major);box-shadow:var(--dsw-shadow-lv2);border-radius:20px;overflow:hidden}" +
-  ".gzc_strip{background:var(--dsw-alias-state-warn-tertiary);color:var(--dsw-alias-state-warn-primary);align-items:center;gap:8px;padding:10px 16px;font-size:13px;line-height:18px;display:flex}" +
-  ".gzc_dot{background:var(--dsw-alias-state-warn-primary);border-radius:50%;width:8px;height:8px}" +
-  ".gzc_body{box-sizing:border-box;max-height:min(50vh,420px);padding:12px 16px 0;color:var(--dsw-alias-label-primary);overflow-y:auto}" +
-  ".gzc_actionRow{justify-content:flex-end;align-items:center;gap:8px;padding:12px 16px 14px;display:flex}" +
-  ".gzc_input{background:var(--dsw-alias-bg-module-platform);border:1px solid var(--dsw-alias-border-l2);border-radius:12px;color:var(--dsw-alias-label-primary);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;padding:6px 10px;width:min(220px,40vw);outline:none}" +
-  ".gzc_input:focus{border-color:var(--dsw-alias-state-warn-primary)}";
-
-const APPROVAL_CLASSES = Object.freeze({
-  root: "gzc_root",
-  card: "gzc_card",
-  strip: "gzc_strip",
-  dot: "gzc_dot",
-  body: "gzc_body",
-  actionRow: "gzc_actionRow",
-  input: "gzc_input",
-});
-
-injectStyle("dsh-command-guard/GuardApprovalCard.module.css", APPROVAL_CSS);
-
-interface GuardApprovalCardProps {
-  /** composer 链 selector 命中后传入的 raw pending（kind === "question"）。 */
-  matched: any;
-}
-
-/**
- * 确认卡：与沙箱拦截的 approval 面板同风格（警告条 + 可滚动命令/说明 + 右下角按钮）。
- * 按钮一次点击即生效；左侧输入框有内容时，拒绝按钮变为"提交"并携带文本回传 host。
- */
-function GuardApprovalCard({ matched }: GuardApprovalCardProps) {
-  const pending = React.useMemo(() => (matched ? new PendingQuestion(matched) : null), [matched]);
-  const question = pending?.questions?.[0];
-  const [note, setNote] = React.useState("");
-  const [busy, setBusy] = React.useState(false);
-
-  if (pending === null || question === undefined) return null;
-
-  const approveLabel = typeof question?.intent?.approve === "string" ? question.intent.approve : APPROVAL_LOCALES_ZH.allow;
-  const options = Array.isArray(question?.options) ? question.options : [];
-  const denyOption = options.find((option: any) => option.label !== approveLabel);
-  const denyLabel = typeof denyOption?.label === "string" ? denyOption.label : APPROVAL_LOCALES_ZH.reject;
-  const hasNote = note.trim().length > 0;
-
-  const commit = async (label: string, custom?: string): Promise<void> => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      // harness 单选校验：custom 与 selected 不能同时携带（matchesQuestions）。
-      // 提交（拒绝 + 留言）只发 custom（selected 置空）；点选项才发 selected。
-      await pending.answer({
-        answers: [{ id: question.id, ...(custom !== undefined ? { selected: [], custom } : { selected: [label] }) }],
-      });
-    } catch {
-      setBusy(false);
-    }
+  const liveOf = (sessionId: string): any => {
+    const binding = sessions.binding(sessionId);
+    return binding === undefined ? undefined : binding.session;
+  };
+  const guardCurrent = (sessionId: string | undefined): Promise<string | null> => {
+    if (sessionId === undefined) return Promise.resolve(null);
+    const live = liveOf(sessionId);
+    if (live === undefined) return Promise.resolve(null);
+    return live
+      .command("/guard")
+      .then((result: any) =>
+        result?.ok === true && result.value?.matched === true && typeof result.value.text === "string" ? result.value.text : null,
+      )
+      .catch(() => null);
+  };
+  const guardSwitch = (sessionId: string, modeId: string): Promise<string> => {
+    const live = liveOf(sessionId);
+    if (live === undefined) return Promise.reject(new Error("session not materialized"));
+    return live.command(`/guard ${modeId}`).then((result: any) => {
+      if (!result?.ok) throw new Error("guard switch failed: " + (result?.error?.message ?? "unknown"));
+      return result.value?.matched === true ? result.value.text : modeId;
+    });
   };
 
-  return (
-    <div className={APPROVAL_CLASSES.root} data-guard-approval-key={pending.key}>
-      <div className={APPROVAL_CLASSES.card}>
-        <div className={APPROVAL_CLASSES.strip}>
-          <span className={APPROVAL_CLASSES.dot} />
-          {APPROVAL_LOCALES_ZH.waiting}
-        </div>
-        <div className={APPROVAL_CLASSES.body} data-guard-approval-scroll="" tabIndex={0} role="group" aria-label="命令审核详情">
-          <MarkdownText text={question.detail ?? ""} />
-        </div>
-        <div className={APPROVAL_CLASSES.actionRow}>
-          <input
-            className={APPROVAL_CLASSES.input}
-            value={note}
-            disabled={busy}
-            placeholder={APPROVAL_LOCALES_ZH.placeholder}
-            aria-label={APPROVAL_LOCALES_ZH.placeholder}
-            onChange={(event) => setNote(event.currentTarget.value)}
-          />
-          <Button
-            variant="outline"
-            disabled={busy}
-            onClick={() => void commit(denyLabel, hasNote ? note.trim() : undefined)}
-          >
-            {hasNote ? APPROVAL_LOCALES_ZH.submit : APPROVAL_LOCALES_ZH.reject}
-          </Button>
-          <Button variant="primary" disabled={busy} onClick={() => void commit(approveLabel)}>
-            {APPROVAL_LOCALES_ZH.allow}
-          </Button>
-        </div>
-      </div>
-    </div>
+  // 1) 确认卡：composer 槽位接管 guard-review。
+  ctx.slots.inject("conversation.composer", () =>
+    ctx.slots.register(
+      {
+        name: "conversation.composer",
+        // 低 priority：先于官方通用提问被询问；仅接管 guard-review，
+        // 其它 pending（普通问询/plan-review）返回 null 交还官方渲染。
+        priority: -20,
+        select: (face: any): PendingLike | null => {
+          const pending = face?.pendingInteraction !== undefined ? face.pendingInteraction : face;
+          return isGuardReview(pending) ? pending : null;
+        },
+      },
+      GuardApprovalCard,
+    ),
   );
-}
 
-// ---------------------------------------------------------------------------
-// 设置行字典
-// ---------------------------------------------------------------------------
-
-const ROW_LOCALES: Record<string, Record<string, Record<string, string>>> = {
-  "settings.commandGuard": {
-    zh: {
-      title: "命令审核",
-      description: "选择新会话的默认命令审核模式",
-      loading: "加载中",
-      unavailable: "不可用",
-    },
-    en: {
-      title: "Command guard",
-      description: "Choose the default command review mode for new sessions",
-      loading: "Loading",
-      unavailable: "Unavailable",
-    },
-  },
-};
-
-// ---------------------------------------------------------------------------
-// 设置读写控制器（读写 commandGuard.mode）
-// ---------------------------------------------------------------------------
-
-const GUARD_SETTINGS_NS = "commandGuard";
-
-/** settings mirror 的描述面（宽松）。 */
-interface DescribeMirrorFace {
-  subscribe(listener: () => void): () => void;
-  ensure(): Promise<void>;
-  getSnapshot(): any;
-  acceptView(view: unknown): void;
-}
-
-interface SettingsApiLike {
-  settings: {
-    mutate(request: unknown): Promise<{ result: { ok: boolean; error?: { message: string }; value?: unknown } }>;
-  };
-}
-
-interface SettingsSchemaLike {
-  rehydrate(schema: unknown): unknown;
-  nodeAtPath(schema: unknown, path: string[]): any;
-}
-
-/** 从 mirror 视图解析动态档位枚举（label 来自 host schema 的 const description）。 */
-function modeValueOf(view: any, schema: SettingsSchemaLike): { currentValue: string; options: { id: string; label: string }[] } {
-  const value = view.value?.mode;
-  if (typeof value !== "string") throw new Error("commandGuard settings has no mode value");
-  const node = schema.nodeAtPath(schema.rehydrate(view.schema), ["mode"]);
-  if (node === undefined) throw new Error("commandGuard settings schema has no mode field");
-  const options = (node.type === "union" ? node.list ?? [] : [node]).flatMap((candidate: any) => {
-    const choice = candidate;
-    if (choice.type !== "const" || typeof choice.value !== "string") return [];
-    const described = choice.meta?.description;
-    return [{
-      id: choice.value,
-      label: typeof described === "string" && described.length > 0 ? described : choice.value,
-    }];
-  });
-  if (options.length === 0 || !options.some((option: any) => option.id === value)) {
-    throw new Error("commandGuard settings schema does not advertise its current mode");
-  }
-  return { currentValue: value, options };
-}
-
-interface RowSnapshot {
-  status: string;
-  error: string | null;
-  writable: boolean;
-  currentValue: string;
-  options: { id: string; label: string }[];
-  revision: number;
-}
-
-/** 行控制器：跟随 mirror 并写回默认档位（仿官方 permission-presets 客户端）。 */
-class GuardModeSettingsController {
-  private following: (() => void) | undefined;
-  private saving = false;
-  private disposed = false;
-
-  /** 行快照 store（通过注入面 hooks.guardMode 提供给组件）。 */
-  store = createSnapshotStore<RowSnapshot>({
-    status: "idle",
-    error: null,
-    writable: false,
-    currentValue: "",
-    options: [],
-    revision: 0,
-  });
-
-  constructor(
-    private readonly describeFace: DescribeMirrorFace,
-    private readonly api: SettingsApiLike,
-    private readonly schema: SettingsSchemaLike,
-  ) {}
-
-  async load(): Promise<void> {
-    if (this.disposed) return;
-    this.following ??= this.describeFace.subscribe(() => {
-      this.derive();
-    });
-    this.store.update((state) => {
-      state.status = "loading";
-      state.error = null;
-    });
-    await this.describeFace.ensure();
-    this.derive();
-  }
-
-  async select(mode: string): Promise<void> {
-    const state = this.store.getSnapshot();
-    const view = this.describeFace.getSnapshot().view?.namespaces?.find((entry: any) => entry.ns === GUARD_SETTINGS_NS);
-    if (view === undefined || !state.writable || this.saving) return;
-    this.saving = true;
-    this.store.update((draft) => {
-      draft.status = "saving";
-      draft.error = null;
-    });
-    try {
-      const response = await this.api.settings.mutate({
-        ns: GUARD_SETTINGS_NS,
-        ops: [{ op: "set", path: ["mode"], value: mode }],
-        expectedRevision: view.revision,
-      });
-      if (!response.result.ok) throw new Error(response.result.error?.message);
-      this.saving = false;
-      if (this.disposed) return;
-      this.describeFace.acceptView(response.result.value);
-    } catch (error) {
-      this.saving = false;
-      if (this.disposed) return;
-      this.fail(error);
-    }
-  }
-
-  dispose(): void {
-    this.disposed = true;
-    this.following?.();
-    this.following = undefined;
-  }
-
-  private derive(): void {
-    if (this.disposed || this.saving) return;
-    const mirrored = this.describeFace.getSnapshot();
-    if (mirrored.status === "unavailable" || mirrored.view === undefined) {
-      this.store.update((state) => {
-        state.status = "unavailable";
-        state.writable = false;
-        state.currentValue = "";
-        state.options = [];
-      });
-      return;
-    }
-    const view = mirrored.view.namespaces?.find((entry: any) => entry.ns === GUARD_SETTINGS_NS);
-    if (view === undefined) {
-      this.store.update((state) => {
-        state.status = "unavailable";
-        state.writable = false;
-        state.currentValue = "";
-        state.options = [];
-      });
-      return;
-    }
-    try {
-      const resolved = modeValueOf(view, this.schema);
-      const { writable } = mirrored.view;
-      this.store.update((state) => {
-        state.status = "ready";
-        state.error = null;
-        state.writable = writable;
-        state.currentValue = resolved.currentValue;
-        state.options = resolved.options;
-        state.revision = view.revision;
-      });
-    } catch (error) {
-      this.fail(error);
-    }
-  }
-
-  private fail(error: unknown): void {
-    this.store.update((state) => {
-      state.status = "error";
-      state.error = error instanceof Error ? error.message : String(error);
-    });
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 客户端插件装配
-// ---------------------------------------------------------------------------
-
-/** 客户端 ctx 的最小面（宽松）。 */
-interface GuardClientCtx {
-  get(name: string): unknown;
-  effect(callback: () => void | (() => void), label?: string): void;
-  locale: {
-    register(ns: string, dictionaries: Record<string, Record<string, string>>): () => void;
-  };
-  slots: {
-    inject(name: string, register: () => void): void;
-    register(options: Record<string, unknown>, component: any): void;
-  };
-  settingsScope?: any;
-  settingsSchema?: any;
-}
-
-export const inject = [
-  "commandUi",
-  "sessions",
-  "slots",
-  "locale",
-  "connection",
-  "remote",
-  "settingsScope",
-  "settingsSchema",
-];
-
-export function apply(ctx: GuardClientCtx): void {
-  const warn = (where: string, error: unknown): void => {
-    try {
-      console.warn(`[dsh-command-guard] ${where} failed:`, error);
-    } catch {
-      /* console 不可用时静默 */
-    }
-  };
-
-  // 1) 宿主 /guard 命令装饰：菜单选中或裸输入 "/guard" 回车 → 弹档位下拉
-  //    （独立 try/catch：即使设置行失败也不影响弹层入口）
+  // 2) 输入区"命令审核"按钮。槽位 occupant 的 inject 会收到当前 sessionId；
+  //    用它闭包出 guardApi，组件不依赖 props.session。
   try {
-    const commandUi = ctx.get("commandUi") as
-      | {
-          decorate(decoration: Record<string, unknown>): void;
-        }
-      | undefined;
-    const sessionFor = (session: { sessionId?: string }) => {
-      const sessions = ctx.get("sessions") as any;
-      return sessions?.binding(session.sessionId)?.session;
-    };
-    if (commandUi !== undefined) {
-      ctx.effect(() => commandUi.decorate({
+    ctx.slots.inject("conversation.input.left", () =>
+      ctx.slots.register(
+        {
+          name: "conversation.input.left",
+          id: "command-guard-zone",
+          order: 0,
+          inject: (sessionId: string): { guardApi: GuardZoneApi } => ({
+            guardApi: {
+              current: () => guardCurrent(sessionId),
+              switchMode: (modeId: string) => guardSwitch(sessionId, modeId),
+            },
+          }),
+        },
+        GuardZone,
+      ),
+    );
+  } catch (error) {
+    console.warn("[dsh-command-guard] input-zone unavailable:", error);
+  }
+
+  // 3) /guard 命令装饰（输入 /guard 时弹出档位选择）。
+  try {
+    if (command !== undefined && typeof command.decorate === "function") {
+      command.decorate({
         name: "guard",
         available: () => true,
         ui: {
           kind: "popupSelect",
-          options: async () => MODE_OPTIONS.map((option) => ({
-            id: option.id,
-            label: option.label,
-            ...(option.detail !== undefined ? { detail: option.detail } : {}),
-          })),
-          onSelect: async (option: ModeOption, session: { sessionId?: string }) => {
-            const live = sessionFor(session);
-            if (live === undefined) throw new Error("this session is not materialized yet");
-            const result = await live.command(`/guard ${option.id}`);
-            if (!result.ok) throw new Error(`guard switch failed: ${result.error.code}: ${result.error.message}`);
-            if (!result.value.matched) throw new Error("the host offers no /guard command");
+          options: (session: any) => {
+            const sessionId = session?.sessionId;
+            return guardCurrent(sessionId).then((current) =>
+              GUARD_MODES.map((entry) => ({ id: entry.id, label: entry.label, ...(entry.id === current ? { active: true } : {}) })),
+            );
+          },
+          onSelect: (option: any, session: any) => {
+            const sessionId = session?.sessionId;
+            if (sessionId === undefined) throw new Error("this session is not materialized yet");
+            return guardSwitch(sessionId, option.id).then(() => undefined);
           },
         },
-      }), "ui-command-guard: /guard decoration");
+      });
     }
   } catch (error) {
-    warn("/guard decoration", error);
-  }
-
-  // 2) 设置行（新会话默认档位）：独立 try/catch，失败不拖垮其余注册
-  try {
-    const connection = ctx.get("connection") as { api?: SettingsApiLike } | undefined;
-    if (connection?.api === undefined) throw new Error("connection service unavailable");
-    const controller = new GuardModeSettingsController(
-      ctx.settingsScope.describe() as DescribeMirrorFace,
-      connection.api,
-      ctx.settingsSchema as SettingsSchemaLike,
-    );
-    const load = (): Promise<void> => controller.load();
-    const select = (mode: string): Promise<void> => controller.select(mode);
-    const injected = (): Record<string, unknown> => ({
-      hooks: { guardMode: controller.store },
-      load,
-      select,
-    });
-    ctx.effect(() => () => {
-      controller.dispose();
-    }, "ui-command-guard: settings row directory");
-    ctx.effect(() => ctx.locale.register(
-      "settings.commandGuard",
-      { zh: ROW_LOCALES["settings.commandGuard"].zh, en: ROW_LOCALES["settings.commandGuard"].en },
-    ), "ui-command-guard: settings row dictionaries");
-    ctx.slots.inject("settings.general.item", () => ctx.slots.register({
-      name: "settings.general.item",
-      id: "command-guard-mode",
-      order: -18,
-      locale: "settings.commandGuard",
-      inject: injected,
-    }, GuardModeRow));
-  } catch (error) {
-    warn("settings row", error);
-  }
-
-  // 3) 输入区常驻"命令审核"图标下拉（conversation.input.left，权限选择同排）
-  //    切换走宿主 /guard <mode>（一次）。读取当前档位改为读 settings 默认档，
-  //    不再用裸 /guard 查询（避免在会话里产生"guard · …"状态行）。
-  try {
-    const runGuard = async (sessionId: string, mode: string): Promise<void> => {
-      const sessions = ctx.get("sessions") as any;
-      const live = sessions?.binding(sessionId)?.session;
-      if (live === undefined) throw new Error("this session is not materialized yet");
-      const result = await live.command(`/guard ${mode}`);
-      if (!result.ok) throw new Error(`guard switch failed: ${result.error.code}: ${result.error.message}`);
-      if (!result.value.matched) throw new Error("the host offers no /guard command");
-    };
-    const readDefaultMode = async (): Promise<string | null> => {
-      try {
-        const mirror = (ctx.settingsScope as any)?.describe?.()?.getSnapshot?.();
-        const ns = mirror?.view?.namespaces?.find((entry: any) => entry.ns === GUARD_SETTINGS_NS);
-        const mode = ns?.value?.mode;
-        return typeof mode === "string" ? mode : null;
-      } catch {
-        return null;
-      }
-    };
-    ctx.slots.inject("conversation.input.left", () => ctx.slots.register({
-      name: "conversation.input.left",
-      id: "command-guard-zone",
-      order: 0,
-      inject: () => ({
-        pickMode: async (sessionId: string, mode: string): Promise<void> => {
-          await runGuard(sessionId, mode);
-        },
-        readDefaultMode,
-      }),
-    }, GuardZone));
-  } catch (error) {
-    warn("input-zone guard select", error);
-  }
-
-  // 4) 确认卡：composer 链上接管"guard-review"提问，渲染 approval 风格卡片
-  //    （一次点击生效 + 输入框：有内容时拒绝按钮变"提交"并携带文本回传）。
-  try {
-    ctx.slots.inject("conversation.composer", () => ctx.slots.register({
-      name: "conversation.composer",
-      priority: -5,
-      select: (owner: any) => {
-        const raw = (owner?.interactions ?? []).find(
-          (interaction: any) =>
-            interaction?.kind === "question" &&
-            interaction?.payload?.questions?.[0]?.intent?.kind === "guard-review",
-        );
-        return raw ?? null;
-      },
-      locale: "guard.approval",
-    }, GuardApprovalCard));
-    ctx.effect(() => ctx.locale.register(
-      "guard.approval",
-      { zh: { ...APPROVAL_LOCALES_ZH }, en: { ...APPROVAL_LOCALES_EN } },
-    ), "ui-command-guard: approval card dictionaries");
-  } catch (error) {
-    warn("approval card composer", error);
+    console.warn("[dsh-command-guard] /guard decoration unavailable:", error);
   }
 }

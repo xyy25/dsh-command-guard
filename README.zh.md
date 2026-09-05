@@ -75,9 +75,38 @@ seam 把问题推给卡片，无需改 dsh 源码：
 
 插件自带客户端 UI（随包分发，无需额外安装）：
 
+> **v0.1.2 适配提示**：dsh v0.1.2 起客户端改为 “module table + 平台 seed” 机制，
+> 第三方 client bundle 只能 require 平台 seed（react 等），且若干旧客户端包
+> （如 `@deepseek-ai/dsh-client-runtime`）已改名/移除。本插件在 v0.1.2 下提供
+> **最小化客户端**：命令审核确认卡（含一次点击与输入框“提交”）正常工作；
+> 旧版 UI（输入区“命令审核”按钮、`/guard` 弹层装饰、设置页“命令审核”行）
+> **暂不提供**（见下方“v0.1.2 客户端适配”），当前可用 `/guard <mode>` 文本命令
+> 切换档位、用配置/`cordis.patch.yml` 设默认档位。
+
 - **输入框工具栏**：权限选择器同排的常驻「命令审核」按钮——**仅图标**（盾形守卫），不占宽度；点击**向上**展开五档下拉、选择即切换当前会话档位。当前档位通过图标的**颜色与符号**区分（硬规则=蓝色字母 R，Agent 各档按阈值由浅到深、点数 1–4 递增），把鼠标悬停在图标上可看到档位全名；打开菜单**不会**在会话中产生额外的状态行。
 - **斜杠命令 `/guard`**：输入 `/` 的候选菜单选中 `/guard`，或直接输入 `/guard` 后回车，都会**弹出档位下拉框**；带参形式 `/guard agent-standard` 直接切换。
 - **设置页 → General → "命令审核"**（"权限"行正下方）：选择**新会话的默认档位**。
+
+## v0.1.2 客户端适配（dsh v0.1.2-rc.1+）
+
+dsh v0.1.2 引入 `dsh-client-modules`（boot 图 + module table）与客户端包重构：
+- **平台 seed 仅 4 个**：`@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-store`、
+  `@deepseek-ai/dsh-client-ui-primitives`、`@deepseek-ai/dsh-client-ui-slots`；
+  第三方 client bundle 只可 require 这些（及 react 系）。旧版 bundle 里
+  `require("@deepseek-ai/dsh-client-runtime/client")`（该包已移除）会直接导致
+  client 装载失败（“missed the module table … build-time externals drift”）。
+- **确认卡**：通过 `conversation.composer` 槽位接管 `intent.kind === "guard-review"`
+  的 pending question（对 PendingQuestion 做鸭子类型，不 import 官方实现包），
+  一次点击允许/拒绝、输入框“提交”等交互保持。
+- **v0.1.2 不再需要 intent 白名单补丁**：新版已移除 question 帧的
+  `plan-review` 白名单（见下方“安装后处理”脚本自检逻辑）。
+- **本版裁剪**（后续按官方新模板逐项补回）：输入区「命令审核」按钮、
+  `/guard` 装饰弹层、设置页命令审核行。保留：确认卡、宿主审核与档位逻辑、
+  `/guard` 文本命令、`guarded` 权限预设。
+- **构建**：client 产物 `client/client.js` 为与 `src/client/client.tsx` 同逻辑的
+  手写 bundle（只 require seed）。若要从 TSX 正式构建，需在本机安装
+  `react`/`@types/react` 与 `@deepseek-ai/dsh-client-ui-primitives` 等 seed
+  依赖，再按 module-table 白名单产出 bundle。
 
 ## "帮我批准"模式（Full access + 命令审核代批）
 
@@ -173,37 +202,29 @@ seam 把问题推给卡片，无需改 dsh 源码：
 - agent 自审失败/超时/无路由时按 `agentFallback` 处理（默认回落规则引擎，避免"失效即放行"）。
 - 即使处于 agent 档，**critical 级硬规则**仍先于 agent 判定（`directDeny=false` 时询问、`true` 时直接拒绝），保证底线不被模型误判绕过。
 
-## 安装后处理：question intent 白名单补丁（重要）
+## 安装后处理：question intent 白名单补丁（仅 dsh v0.1.1-rc.x 需要）
 
-插件自绘的"命令审核"确认卡（含一次点击与输入框/提交）依赖宿主发出
-`intent.kind = "guard-review"` 的问题。但 harness 的 userQuestions wire schema
-把 `intent.kind` 限定为只允许 `"plan-review"`（`dsh-client-connection` 与
-`dsh-host-apiproxy` 两处 zod `discriminatedUnion`）；未知 intent 会在**浏览器端
-解码时整帧被丢弃**，控制台可见：
+插件自绘的"命令审核"确认卡依赖宿主发出 `intent.kind = "guard-review"` 的问题。
+在 **dsh v0.1.1-rc.x** 中，harness 的 userQuestions wire schema 把 `intent.kind`
+限定为只允许 `"plan-review"`（`dsh-client-connection` 与 `dsh-host-apiproxy`
+两处 zod `discriminatedUnion`）；未知 intent 会在浏览器端解码时整帧被丢弃
+（控制台可见 `ZodError … options: ["plan-review"]`），表现为不弹卡、宿主
+`ask` 挂起转圈。
 
-```
-[client-connection] dropping malformed WebSocket frame … ZodError:
-  discriminator "kind", options: ["plan-review"], path: ["questions",0,"intent","kind"]
-```
+**dsh v0.1.2+ 已移除该帧级白名单，guard-review 无需任何补丁。** 脚本会自动
+检测：目标文件已无 `plan-review` 锁时打印“新版无需补丁”并正常退出（可直接
+运行一次确认）。
 
-表现为：命令被判定风险后**不弹任何卡**、宿主 `ask` 一直挂起（会话转圈）。
-这是 harness 的限制，插件自身无法绕开（schema 是模块私有常量、无运行期扩展
-入口），因此需要一次性的"安装后处理"给两处 union 各追加 `guard-review` 成员
-（不触碰其它逻辑，`plan-review` 行为不变）。
-
-### 运行补丁脚本
+### 运行补丁脚本（仅旧版）
 
 ```sh
 cd G:\dsh-dev\plugins\dsh-command-guard
 node tools/patch-dsh-question-intent.mjs --dsh "E:\\nvm\\v24.14.1\\node_modules\\@deepseek-ai\\dsh"
 ```
 
-- `--dsh` 指向 `@deepseek-ai/dsh` 包的安装目录（含 `package.json` 的目录；上面是
-  本机路径示例）。也可以设置环境变量 `DSH_ROOT`。
-- 脚本**幂等**：目标文件已含 `guard-review` 时跳过，重复执行安全。
-- 每次真实修改前先备份为 `<文件>.bak-intent-guard-review`（不覆盖既有备份）。
-- 修改后用 `node --check` 校验语法。
-- 需要**重启 dsh**（并刷新浏览器）让新 bundle 生效。
+- `--dsh` 指向 `@deepseek-ai/dsh` 包安装目录（本机示例；也可设环境变量 `DSH_ROOT`）。
+- 脚本**幂等**；每次真实修改前备份为 `<文件>.bak-intent-guard-review`；
+  修改后用 `node --check` 校验；需重启 dsh 生效。
 
 ### 回滚
 
@@ -211,12 +232,11 @@ node tools/patch-dsh-question-intent.mjs --dsh "E:\\nvm\\v24.14.1\\node_modules\
 node tools/patch-dsh-question-intent.mjs --dsh "<dsh-root>" --undo
 ```
 
-从备份还原两个文件，重启 dsh 即可。
+### 版本升级后
 
-### dsh 升级之后
-
-升级 dsh 会覆盖这两个文件，需重新运行一次补丁脚本（备份文件会保留旧版改动，
-可帮助人工确认）。
+- 升级到 **v0.1.2+**：无需处理（脚本会自检放行）；如残留 v0.1.1 打的补丁，可
+  运行 `--undo` 还原成官方文件。
+- 仍在 **v0.1.1-rc.x**：升级 dsh 会覆盖被打补丁的两个文件，需重跑一次脚本。
 
 ## 源码与构建（TypeScript / TSX）
 
