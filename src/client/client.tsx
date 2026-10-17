@@ -193,37 +193,40 @@ function GuardApprovalCard(props: { matched?: PendingLike }) {
 // 当前会话 id；组件只依赖注入面（guardApi 已把 sessionId 闭包绑定）。
 // ---------------------------------------------------------------
 interface GuardZoneApi {
-  current(): Promise<string | null>;
+  /** 读 host settings 里的默认档位（无副作用：不执行 /guard，不写会话状态行）。 */
+  defaultMode(): Promise<string | null>;
+  /** 用户主动切换档位（执行 /guard <mode>）。 */
   switchMode(modeId: string): Promise<string>;
 }
 /**
  * 输入区"命令审核"按钮（样式与旧版一致）：圆形"仅图标"按钮（与"+"号同款），
  * 用盾形图标的颜色/符号区分档位；点击后弹层**向上**展开，外部点击关闭。
- * 槽位 occupant 的 inject(sessionId) 回调会收到当前会话 id，guardApi 已闭包绑定。
+ * 注意：初始档位只读 host settings（不执行任何命令），否则每次进入会话都会
+ * 在会话里多出一条 `guard · …` 状态行。
  */
-function GuardZone(props: { guardApi?: GuardZoneApi }) {
+function GuardZone(props: { sessionId?: string; guardApi?: GuardZoneApi }) {
   const api = props.guardApi;
   const [current, setCurrent] = React.useState<string | null>(null);
   const [open, setOpen] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const hostRef = React.useRef<HTMLSpanElement | null>(null);
 
-  // 初始：读当前会话档位。
+  // 初始档位：读 settings 默认档（无副作用，可安全重复）。
   React.useEffect(() => {
-    if (!api || typeof api.current !== "function") return;
+    if (!api || typeof api.defaultMode !== "function") return;
     let alive = true;
     api
-      .current()
+      .defaultMode()
       .then((value) => {
         if (alive && typeof value === "string") setCurrent(value);
       })
       .catch(() => {
-        /* host 未提供 /guard 时保持默认 */
+        /* 读取失败时保持默认图标 */
       });
     return () => {
       alive = false;
     };
-  }, [api]);
+  }, [api, props.sessionId]);
 
   // 点击外部关闭向上弹层。
   React.useEffect(() => {
@@ -306,21 +309,37 @@ export function apply(ctx: any): void {
   injectStyle(ZONE_STYLE_ID, ZONE_CSS);
   const sessions = ctx.sessions;
   const command = ctx.get("commandUi");
+  // settingsScope 为可选服务：只读默认档位，缺失时 zone 仅显示默认图标。
+  const settingsScope = ctx.get("settingsScope");
 
   const liveOf = (sessionId: string): any => {
     const binding = sessions.binding(sessionId);
     return binding === undefined ? undefined : binding.session;
   };
-  const guardCurrent = (sessionId: string | undefined): Promise<string | null> => {
-    if (sessionId === undefined) return Promise.resolve(null);
-    const live = liveOf(sessionId);
-    if (live === undefined) return Promise.resolve(null);
-    return live
-      .command("/guard")
-      .then((result: any) =>
-        result?.ok === true && result.value?.matched === true && typeof result.value.text === "string" ? result.value.text : null,
-      )
-      .catch(() => null);
+  /**
+   * 读 settings namespace `commandGuard` 的默认档位（无副作用）。
+   * 绝不要改成执行 `/guard` 来查询：命令会写入会话，导致每次进入会话多出
+   * 一条 `guard · …` 状态行。
+   */
+  const readDefaultMode = async (): Promise<string | null> => {
+    try {
+      const face = settingsScope?.describe?.();
+      if (face === undefined) return null;
+      if (typeof face.ensure === "function") {
+        try {
+          await face.ensure();
+        } catch {
+          /* 忽略：拿不到快照就保持默认 */
+        }
+      }
+      const snapshot = typeof face.getSnapshot === "function" ? face.getSnapshot() : undefined;
+      const namespaces = snapshot?.view?.namespaces;
+      const entry = Array.isArray(namespaces) ? namespaces.find((item: any) => item?.ns === "commandGuard") : undefined;
+      const mode = entry?.value?.mode;
+      return typeof mode === "string" ? mode : null;
+    } catch {
+      return null;
+    }
   };
   const guardSwitch = (sessionId: string, modeId: string): Promise<string> => {
     const live = liveOf(sessionId);
@@ -357,9 +376,10 @@ export function apply(ctx: any): void {
           name: "conversation.input.left",
           id: "command-guard-zone",
           order: 0,
-          inject: (sessionId: string): { guardApi: GuardZoneApi } => ({
+          inject: (sessionId: string): { sessionId: string; guardApi: GuardZoneApi } => ({
+            sessionId,
             guardApi: {
-              current: () => guardCurrent(sessionId),
+              defaultMode: readDefaultMode,
               switchMode: (modeId: string) => guardSwitch(sessionId, modeId),
             },
           }),
@@ -380,8 +400,9 @@ export function apply(ctx: any): void {
         ui: {
           kind: "popupSelect",
           options: (session: any) => {
-            const sessionId = session?.sessionId;
-            return guardCurrent(sessionId).then((current) =>
+            // 仅读 settings 默认档标 active（不执行命令，避免写入会话状态行）。
+            void session;
+            return readDefaultMode().then((current) =>
               GUARD_MODES.map((entry) => ({ id: entry.id, label: entry.label, ...(entry.id === current ? { active: true } : {}) })),
             );
           },

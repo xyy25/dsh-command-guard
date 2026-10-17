@@ -11,7 +11,7 @@
 // 两个目标文件不存在（或不再含 plan-review 锁）时，打印提示并正常退出。
 //
 // 用法：
-//   node tools/patch-dsh-question-intent.mjs --dsh "E:\\nvm\\v24.14.1\\node_modules\\@deepseek-ai\\dsh"
+//   node tools/patch-dsh-question-intent.mjs --dsh "E:\\nvm4w\\nodejs\\node_modules\\@deepseek-ai\\dsh"
 //   node tools/patch-dsh-question-intent.mjs --dsh <dsh-root> --undo   # 回滚（v0.1.1）
 //
 // 行为：幂等；真实修改前备份 <file>.bak-intent-guard-review；改后 node --check。
@@ -34,10 +34,22 @@ function parseArgs(argv) {
   return args;
 }
 
+/**
+ * 候选 dsh 安装目录：先按当前 node 可执行文件推导（nvm / nvm4w / 官方安装器
+ * 布局都适用），再补 npm 全局根与已知的历史路径形态。
+ * 注：`E:\nvm4w\nodejs` 在本机是指向 `E:\nvm\v24.14.1` 的符号链接，两者等价。
+ */
 function candidateRoots() {
   const list = [];
-  if (process.env.DSH_ROOT) list.push(process.env.DSH_ROOT);
+  list.push(join(process.execPath, "..", "node_modules", "@deepseek-ai", "dsh"));
+  try {
+    const npmRoot = execFileSync("npm", ["root", "-g"], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    if (npmRoot !== "") list.push(join(npmRoot, "@deepseek-ai", "dsh"));
+  } catch {
+    /* npm 不可用时忽略 */
+  }
   list.push(
+    "E:\\nvm4w\\nodejs\\node_modules\\@deepseek-ai\\dsh",
     "E:\\nvm\\v24.14.1\\node_modules\\@deepseek-ai\\dsh",
     "C:\\Program Files\\nodejs\\node_modules\\@deepseek-ai\\dsh",
   );
@@ -59,7 +71,7 @@ function locateDshRoot(explicit) {
     }
   }
   const hint = process.platform === "win32"
-    ? "例如：node tools/patch-dsh-question-intent.mjs --dsh \"E:\\nvm\\v24.14.1\\node_modules\\@deepseek-ai\\dsh\""
+    ? "例如：node tools/patch-dsh-question-intent.mjs --dsh \"E:\\nvm4w\\nodejs\\node_modules\\@deepseek-ai\\dsh\""
     : "例如：node tools/patch-dsh-question-intent.mjs --dsh /path/to/node_modules/@deepseek-ai/dsh";
   throw new Error(`找不到 @deepseek-ai/dsh 安装目录。请用 --dsh 指定（${hint}），或设置环境变量 DSH_ROOT。`);
 }
