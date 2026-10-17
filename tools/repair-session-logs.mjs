@@ -137,6 +137,8 @@ async function loadFormatKit(root) {
     catalog: catalogModule.sessionFormatCatalog,
     dispositions: v0Module.RELEASED_V0_EVENT_DISPOSITIONS,
     assertPayload: v0Module.assertReleasedEventPayload,
+    codec: v0Module.releasedV0SessionFormatCodec,
+    assertRelationships: v0Module.assertReleasedArtifactRelationships,
   };
 }
 
@@ -197,6 +199,25 @@ function scanZstdFrames(buffer) {
  * @param {string} file 会话文件路径。
  * @returns {{headerText:string, header:object, eventText:string, frameCount:number, raw:Buffer}}
  */
+/**
+ * 只读 header（不解压事件帧）。用于版本守卫：v1+ 的会话直接跳过，
+ * 避免把整份日志解压后再丢弃。
+ * @param {string} file 会话文件路径。
+ * @returns {object} header 对象。
+ */
+function readHeaderOnly(file) {
+  const raw = readFileSync(file);
+  const scanned = scanZstdFrames(raw);
+  if (scanned.error !== undefined) throw new Error(`zstd 帧结构损坏：${scanned.error}`);
+  if (scanned.frames.length === 0) throw new Error("文件里没有任何 zstd 帧");
+  const first = scanned.frames[0];
+  const headerText = zlib.zstdDecompressSync(raw.subarray(first.start, first.end)).toString("utf8");
+  if (!headerText.endsWith("\n") || headerText.indexOf("\n") !== headerText.length - 1) {
+    throw new Error("第一个 zstd 帧不是恰好一行 header（dsh 要求 header 单独成帧）");
+  }
+  return JSON.parse(headerText.trim());
+}
+
 function readSessionLog(file) {
   const raw = readFileSync(file);
   const scanned = scanZstdFrames(raw);
@@ -395,18 +416,48 @@ function repairRows(rawRows, plan) {
 }
 
 // ---------------------------------------------------------------------------
-// 校验：用 dsh 自己的目录做 v0 → v3 全链路校验
+// 校验：v0 自检（seq 稠密 + 冻结清单 + payload 语义）
+//
+// 不能再用 catalog 的 createRestore(validation:"current")：dsh 0.2.0 把格式升到
+// v4，v0→v1→v2→v3→v4 的最后一跳需要"子会话 catalog 事实"，单文件校验提供不了，
+// 会误报 `V3 catalog migration requires explicit historical child facts…`。
+// 这里做与修复目标等价的自检，真正的格式还原交给 dsh。
 // ---------------------------------------------------------------------------
 
-function verifyRows(header, rows, kit) {
-  try {
-    const restore = kit.catalog.createRestore(header, { recovery: "strict", validation: "current" });
-    for (const row of rows) restore.decodeRow(row);
-    const artifact = restore.finish();
-    return { ok: true, version: artifact.header.version, eventCount: artifact.events.length };
-  } catch (error) {
-    return { ok: false, name: error?.constructor?.name ?? "Error", message: String(error?.message ?? error) };
+function selfCheck(header, rows, kit) {
+  let expected = 0;
+  for (const row of rows) {
+    const steps = typeof row.seq0 === "number" ? (Array.isArray(row.data?.dt) ? row.data.dt.length + 1 : 1) : 1;
+    const seq = typeof row.seq0 === "number" ? row.seq0 : row.seq;
+    if (seq !== expected) {
+      return { ok: false, message: `seq 不稠密：期望 ${expected}，实际 ${String(seq)}（${String(row.type)}）` };
+    }
+    expected += steps;
   }
+  const audit = auditEvents(deepCopy(rows), kit);
+  if (audit.unfixable.length > 0) return { ok: false, message: audit.unfixable[0] };
+  if (audit.drops.length > 0) return { ok: false, message: `仍存在未知事件（seq ${audit.drops.join(", ")}）` };
+  if (audit.payloadFixes.size > 0) return { ok: false, message: "仍存在多余 payload 成员" };
+  // 关系校验（v0 冻结规则）：能检出"同一步重复广播 tool-call"这类历史不一致。
+  // 注意 createDecoder 会就地改写传入的行，必须用深拷贝。
+  if (typeof kit.assertRelationships === "function" && typeof kit.codec?.createDecoder === "function") {
+    try {
+      const collected = [];
+      const collector = {
+        emitEvent: (event) => collected.push(event),
+        emitRun: (run) => {
+          for (const event of run.expand()) collected.push(event);
+        },
+      };
+      const decoder = kit.codec.createDecoder(header, "strict");
+      for (const row of deepCopy(rows)) decoder.decodeRow(row, collector);
+      const inherited = decoder.finish(collector);
+      kit.assertRelationships({ header: decoder.header, inheritedEventCount: inherited, events: collected });
+    } catch (error) {
+      return { ok: false, message: `关系校验失败：${error?.message ?? error}` };
+    }
+  }
+  return { ok: true, eventCount: expected };
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +505,16 @@ function processFile(file, args, kit) {
     return result;
   }
 
+  // 只处理 v0：冻结清单是本脚本的审计依据。v1+ 是 dsh 迁移的产物（0.2.0 下已到
+  // v4），交给 dsh 自己加载/迁移，避免用错了词汇表把合法事件当成"未知事件"删掉。
+  // 先只读 header 判断版本，命中就跳过（不解压事件帧）。
+  const earlyHeader = readHeaderOnly(file);
+  if (earlyHeader.version !== 0) {
+    result.status = "skipped";
+    result.detail = `已是 v${earlyHeader.version} 格式（由 dsh 迁移产生），本脚本只修 v0，无需处理。`;
+    return result;
+  }
+
   const { headerText, header, eventText } = readSessionLog(file);
   const rawRows = parseRows(eventText);
   const auditRows = deepCopy(rawRows);
@@ -466,9 +527,9 @@ function processFile(file, args, kit) {
   }
   if (audit.drops.length === 0 && audit.payloadFixes.size === 0) {
     // 已修复过，或本来干净
-    const check = verifyRows(header, deepCopy(rawRows), kit);
+    const check = selfCheck(header, rawRows, kit);
     result.status = check.ok ? "clean" : "unfixable";
-    if (!check.ok) result.detail = `${check.name}: ${check.message}`;
+    if (!check.ok) result.detail = check.message;
     return result;
   }
 
@@ -487,10 +548,10 @@ function processFile(file, args, kit) {
   }
 
   const fixedRows = repairRows(rawRows, audit);
-  const check = verifyRows(header, deepCopy(fixedRows), kit);
+  const check = selfCheck(header, fixedRows, kit);
   if (!check.ok) {
     result.status = "unfixable";
-    result.detail = `${check.name}: ${check.message}（${classifyFailure(check.message)}）`;
+    result.detail = `${check.message}（${classifyFailure(check.message)}）`;
     return result;
   }
 
@@ -498,7 +559,7 @@ function processFile(file, args, kit) {
   for (const [index, keys] of audit.payloadFixes) {
     result.actions.push(`清理 ${rawRows[index]?.type} @seq ${String(rawRows[index]?.seq)} 的多余成员 ${keys.join(", ")}`);
   }
-  result.actions.push(`物理行 ${rawRows.length} → ${fixedRows.length}，校验通过（v${check.version}）`);
+  result.actions.push(`物理行 ${rawRows.length} → ${fixedRows.length}，自检通过（seq 稠密 + 冻结清单 + payload）`);
   result.status = args.apply ? "repaired" : "would-repair";
 
   if (args.apply) {
@@ -573,6 +634,7 @@ for (const item of results) {
     "would-repair": "待修复",
     repaired: "已修复",
     unfixable: "不可自动修复",
+    skipped: "已是新版",
     restored: "已还原",
     "no-backup": "无备份",
     error: "读取失败",
@@ -587,7 +649,7 @@ console.log("");
 console.log(
   `汇总：共 ${results.length} 个会话；干净 ${count("clean")}，`
   + `待修复 ${count("would-repair")}，已修复 ${count("repaired")}，`
-  + `不可自动修复 ${count("unfixable")}，读取失败 ${count("error")}。`,
+  + `已是新版（跳过）${count("skipped")}，不可自动修复 ${count("unfixable")}，读取失败 ${count("error")}。`,
 );
 if (!args.apply && !args.undo && count("would-repair") > 0) {
   console.log("这是只读检查。确认上面的修复项后，请执行：node tools/repair-session-logs.mjs --apply");

@@ -259,26 +259,39 @@ function GuardZone(props) {
 // ---------------------------------------------------------------
 // 客户端插件主体。
 // ---------------------------------------------------------------
+/** 默认档位可能所在的 settings namespace（按 dsh 版本从新到旧）。 */
+const GUARD_SETTINGS_NS = ["command-guard", "commandGuard", "dsh-command-guard"];
 exports.inject = ["slots", "sessions", "commandUi"];
 function apply(ctx) {
     injectStyle(STYLE_ID, CARD_CSS);
     injectStyle(ZONE_STYLE_ID, ZONE_CSS);
     const sessions = ctx.sessions;
     const command = ctx.get("commandUi");
-    // settingsScope 为可选服务：只读默认档位，缺失时 zone 仅显示默认图标。
+    // 设置读取源（可选服务）：dsh 0.2.0 起 settingsScope 被 configForms 取代，
+    // 两者 describe() 的结构一致（mirror 有 ensure()/getSnapshot()）；0.1.x 仍是
+    // settingsScope。都缺失时 zone 仅显示默认图标。
+    const configForms = ctx.get("configForms");
     const settingsScope = ctx.get("settingsScope");
+    const settingsFace = configForms ?? settingsScope;
     const liveOf = (sessionId) => {
         const binding = sessions.binding(sessionId);
         return binding === undefined ? undefined : binding.session;
     };
     /**
-     * 读 settings namespace `commandGuard` 的默认档位（无副作用）。
+     * 读默认档位（无副作用）。
+     *
+     * namespace 随 dsh 版本变化：
+     *   - 0.1.x：本插件自注册的 `commandGuard`；
+     *   - 0.2.0+：settings 改为按插件 Config 自动派生，ns 即 profile patch 里的
+     *     entry id（通常是 `command-guard`），值就是 config。
+     * 因此按候选列表查找，最后回退到"任意 namespace 的 mode 恰好是合法档位"。
+     *
      * 绝不要改成执行 `/guard` 来查询：命令会写入会话，导致每次进入会话多出
      * 一条 `guard · …` 状态行。
      */
     const readDefaultMode = async () => {
         try {
-            const face = settingsScope?.describe?.();
+            const face = settingsFace?.describe?.();
             if (face === undefined)
                 return null;
             if (typeof face.ensure === "function") {
@@ -291,9 +304,18 @@ function apply(ctx) {
             }
             const snapshot = typeof face.getSnapshot === "function" ? face.getSnapshot() : undefined;
             const namespaces = snapshot?.view?.namespaces;
-            const entry = Array.isArray(namespaces) ? namespaces.find((item) => item?.ns === "commandGuard") : undefined;
-            const mode = entry?.value?.mode;
-            return typeof mode === "string" ? mode : null;
+            if (!Array.isArray(namespaces))
+                return null;
+            for (const ns of GUARD_SETTINGS_NS) {
+                const entry = namespaces.find((item) => item?.ns === ns);
+                const mode = entry?.value?.mode;
+                if (typeof mode === "string")
+                    return mode;
+            }
+            // 兜底：entry id 由用户自定（cordis.patch.yml 里可任意命名），
+            // 用"值恰好是合法档位"来认领。
+            const byValue = namespaces.find((item) => typeof item?.value?.mode === "string" && GUARD_MODES.some((m) => m.id === item.value.mode));
+            return typeof byValue?.value?.mode === "string" ? byValue.value.mode : null;
         }
         catch {
             return null;

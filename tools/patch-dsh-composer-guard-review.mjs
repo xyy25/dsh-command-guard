@@ -34,11 +34,12 @@ const NEW = "select: ({ pendingInteraction }) => (pendingInteraction instanceof 
 const MARKER = 'kind !== "guard-review"';
 
 function parseArgs(argv) {
-  const args = { dsh: process.env.DSH_ROOT, undo: false, check: false };
+  const args = { dsh: process.env.DSH_ROOT, undo: false, check: false, force: false };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--undo") args.undo = true;
     else if (a === "--check") args.check = true;
+    else if (a === "--force") args.force = true;
     else if (a.startsWith("--dsh=")) args.dsh = a.slice("--dsh=".length);
     else if (a === "--dsh") args.dsh = argv[++i];
     else throw new Error(`未知参数：${a}`);
@@ -104,6 +105,22 @@ function syntaxCheck(file) {
   }
 }
 
+/** 读 dsh 版本号（读不到时返回空串）。 */
+function readDshVersion(root) {
+  try {
+    return JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** 判断是否 dsh 0.2.0 及以上（预发布同样按主次版本比较）。 */
+function isAtLeast020(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (match === null) return false;
+  return Number(match[1]) > 0 || Number(match[2]) >= 2;
+}
+
 const args = parseArgs(process.argv);
 const root = locateDshRoot(args.dsh);
 const file = join(root, TARGET_REL);
@@ -119,6 +136,16 @@ if (args.undo) {
   if (!syntaxCheck(file)) throw new Error(`${file} 语法校验失败，请人工检查。`);
   console.log(`[restored] ${TARGET_REL}（来自 ${backup}）`);
   console.log("完成。请重启 dsh 并刷新浏览器使改动生效。");
+  process.exit(0);
+}
+
+// dsh 0.2.0 起 conversation.composer 仍是 chain 槽，且注册时按 priority 升序排列：
+// 本插件 occupant 的 priority = -20 先于官方 occupant 的 0，select 直接接管
+// guard-review，无需再让官方"让位"。默认跳过；确需强制打补丁时加 --force。
+const version = readDshVersion(root);
+if (!args.force && isAtLeast020(version)) {
+  console.log(`[skipped] dsh ${version}：composer chain 按 priority 选举（本插件 -20 先于官方 0），`);
+  console.log("          确认卡已由本插件接管，无需让位补丁。若实测未接管，可加 --force 强制打补丁。");
   process.exit(0);
 }
 

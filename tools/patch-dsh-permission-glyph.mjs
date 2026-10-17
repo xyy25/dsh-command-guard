@@ -1,14 +1,15 @@
 // dsh-command-guard —— dsh 安装后处理脚本：为权限菜单里的自定义预设
 // `guarded`（"帮我审核"）补一个图标。
 //
-// 为什么需要：权限选择器（dsh-client-ui-conversation 的 PermissionSelect）
-// 只对设计集内的预设渲染图标，其余（包括 profile patch 里新增的 guarded）
-// 一律落到 permissionGlyph() === undefined 的"无图标"分支。dsh 升级会覆盖
-// node_modules，所以补丁必须重新执行；本脚本把它变成幂等、可撤销的一步。
+// 为什么需要：权限下拉只对设计集内的预设渲染图标，其余（包括 profile patch
+// 里新增的 guarded）一律落到 permissionGlyph() === undefined 的"无图标"分支。
+// dsh 升级会覆盖 node_modules，所以补丁必须重新执行；本脚本把它变成幂等、
+// 可撤销的一步。
 //
-// 兼容性：同一文件内的锚点 `const permissionGlyphs = new Map([` 在 dsh v0.1.2
-// 与 v0.1.5 的 conversation 客户端产物中都唯一存在；脚本只做结构探测，找不到
-// 锚点会明确报错且**不修改任何文件**。
+// 目标文件随 dsh 版本变化：
+//   - dsh 0.2.0+：权限选择器与 glyph 表在 dsh-client-ui-permission-presets；
+//   - dsh 0.1.x ：在 dsh-client-ui-conversation。
+// 脚本按顺序探测，用第一个存在且含 permissionGlyphs 的文件。
 //
 // 为什么插入点在 `new Map([` 之后：Map 的最后一项通常**没有尾随逗号**，若把新
 // 条目插到闭合 `]);` 之前却不补逗号，JS 会把
@@ -17,7 +18,7 @@
 // 于是 `new Map([…, undefined])` 在运行时抛
 //   TypeError: Iterator value undefined is not an entry object
 // 表现为 dsh 启动时报
-//   failed to import loader entry … (@deepseek-ai/dsh-client-ui-conversation)
+//   failed to import loader entry … (@deepseek-ai/dsh-client-ui-…)
 // 注意 `node --check` **发现不了**这类错误（`[a][b]` 语法合法），所以本脚本在
 // 写盘前会把 Map 定义片段真正求值一次，确认条目数与 `guarded` 键都正确。
 //
@@ -34,16 +35,27 @@ import { execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
 
 const BACKUP_SUFFIX = ".bak-permission-glyph";
-const TARGET_REL = join("node_modules", "@deepseek-ai", "dsh-client-ui-conversation", "lib", "client.js");
+/**
+ * 目标文件候选（按 dsh 版本从新到旧）。运行时挑第一个存在且含
+ * `permissionGlyphs` 的文件。
+ */
+const TARGET_RELS = [
+  join("node_modules", "@deepseek-ai", "dsh-client-ui-permission-presets", "lib", "client.js"),
+  join("node_modules", "@deepseek-ai", "dsh-client-ui-conversation", "lib", "client.js"),
+];
 /** Map 起始处：把新条目插到它**之后**，新条目自带尾随逗号。 */
 const ANCHOR = "const permissionGlyphs = new Map([\n";
 /** 幂等标记：Map 里是否已有 guarded 键。 */
 const MARKER = '["guarded"';
 const MAP_OPEN = "const permissionGlyphs = new Map([";
 const MAP_CLOSE = "\n\t\t]);";
+/** 盾牌轮廓：与 dsh 设计集同一路径，内联以免依赖目标文件里的变量名。 */
+const SHIELD_PATH = "M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z";
+/** 内部几何化字母 G：与 read-only 的对勾、danger 的感叹号区分开。 */
+const GLYPH_G_PATH = "M9.6 5.9 A2 2 0 1 0 9.6 9.9 L9.6 8.1 L8.1 8.1";
 /**
- * 插入的图标条目：盾牌轮廓（复用同文件内的 shieldOutline）+ 内部几何化字母 G
- * （表示"审核后再决定放行"，与 read-only 的对勾、danger 的感叹号区分开）。
+ * 插入的图标条目：**自包含** svg（不引用目标文件里的 shieldOutline 等变量），
+ * 因此同一个条目在 0.1.x（conversation）与 0.2.0+（permission-presets）都可用。
  */
 const ENTRY = [
   '\t\t\t["guarded", (0, react_jsx_runtime.jsxs)("svg", {',
@@ -53,12 +65,12 @@ const ENTRY = [
   '\t\t\t\tfill: "none",',
   '\t\t\t\t"aria-hidden": true,',
   '\t\t\t\tchildren: [(0, react_jsx_runtime.jsx)("path", {',
-  "\t\t\t\t\td: shieldOutline,",
+  `\t\t\t\t\td: "${SHIELD_PATH}",`,
   '\t\t\t\t\tstroke: "currentColor",',
   '\t\t\t\t\tstrokeWidth: "1.31831",',
   '\t\t\t\t\tstrokeLinejoin: "round"',
   '\t\t\t\t}), (0, react_jsx_runtime.jsx)("path", {',
-  '\t\t\t\t\td: "M9.6 5.9 A2 2 0 1 0 9.6 9.9 L9.6 8.1 L8.1 8.1",',
+  `\t\t\t\t\td: "${GLYPH_G_PATH}",`,
   '\t\t\t\t\tfill: "none",',
   '\t\t\t\t\tstroke: "currentColor",',
   '\t\t\t\t\tstrokeWidth: "1.35",',
@@ -119,6 +131,18 @@ function locateDshRoot(explicit) {
   );
 }
 
+/** 选择实际存在的 glyph 表所在文件；都不存在时抛错。 */
+function selectTarget(root) {
+  for (const rel of TARGET_RELS) {
+    const file = join(root, rel);
+    if (!existsSync(file)) continue;
+    if (readFileSync(file, "utf8").includes(MAP_OPEN)) return { file, rel };
+  }
+  throw new Error(
+    `找不到含 permissionGlyphs 的客户端文件（已尝试：${TARGET_RELS.join(" | ")}）；dsh 结构可能已变化。`,
+  );
+}
+
 /** 截取 `const permissionGlyphs = new Map([ … ]);` 源码片段。 */
 function extractGlyphMapSource(text) {
   const start = text.indexOf(MAP_OPEN);
@@ -137,9 +161,17 @@ function extractGlyphMapSource(text) {
 function evaluateGlyphMap(text) {
   const fragment = extractGlyphMapSource(text);
   if (fragment === undefined) throw new Error("无法定位 permissionGlyphs 的 Map 定义（结构可能已变化）");
+  // 桩覆盖两个版本里 Map 可能引用的全部外部符号：
+  //   0.1.x（conversation）：shieldOutline / FULL_ACCESS / 内联 svg
+  //   0.2.0+（permission-presets）：FULL_ACCESS_PRESET / primitives 图标组件
   const prelude = [
     'const shieldOutline = "M0 0";',
     'const FULL_ACCESS = "danger-full-access";',
+    'const FULL_ACCESS_PRESET = "danger-full-access";',
+    "const _deepseek_ai_dsh_client_ui_primitives = {"
+      + " PermissionIconReadOnlyRegular: () => ({ tag: \"ro\" }),"
+      + " PermissionIconWorkspaceWriteRegular: () => ({ tag: \"ww\" }),"
+      + " PermissionIconFullAccessRegular: () => ({ tag: \"fa\" }) };",
     'const react_jsx_runtime = { jsx: () => ({ tag: "jsx" }), jsxs: () => ({ tag: "jsxs" }) };',
     "",
   ].join("\n");
@@ -154,9 +186,6 @@ function inspect(file) {
   if (text.includes(MARKER)) return { text, status: "already-patched" };
   if (!text.includes(MAP_OPEN)) {
     throw new Error(`${file}: 未找到 permissionGlyphs Map，dsh 结构可能已变化，请人工检查。`);
-  }
-  if (!text.includes("const shieldOutline = ")) {
-    throw new Error(`${file}: 未找到 shieldOutline 常量（新增图标复用它），dsh 结构可能已变化，请人工检查。`);
   }
   const count = text.split(ANCHOR).length - 1;
   if (count !== 1) {
@@ -193,19 +222,20 @@ function buildPatched(text) {
 
 const args = parseArgs(process.argv);
 const root = locateDshRoot(args.dsh);
-const file = join(root, TARGET_REL);
+const { file, rel } = selectTarget(root);
 console.log(`dsh root: ${root}`);
+console.log(`目标文件: ${rel}`);
 
 if (args.undo) {
   const backup = file + BACKUP_SUFFIX;
   if (!existsSync(backup)) {
-    console.log(`[no-backup] ${TARGET_REL}（没有备份可还原）`);
+    console.log(`[no-backup] ${rel}（没有备份可还原）`);
     process.exit(0);
   }
   copyFileSync(backup, file);
   if (!syntaxCheck(file)) throw new Error(`${file} 语法校验失败，请人工检查。`);
   const keys = evaluateGlyphMap(readFileSync(file, "utf8"));
-  console.log(`[restored] ${TARGET_REL}（来自 ${backup}）；当前 Map 条目：${keys.join(", ")}`);
+  console.log(`[restored] ${rel}（来自 ${backup}）；当前 Map 条目：${keys.join(", ")}`);
   console.log("完成。请重启 dsh 并刷新浏览器使改动生效。");
   process.exit(0);
 }
@@ -213,14 +243,14 @@ if (args.undo) {
 const inspected = inspect(file);
 if (inspected.status === "already-patched") {
   const keys = evaluateGlyphMap(inspected.text);
-  console.log(`[already-patched] ${TARGET_REL}：guarded 图标已存在，无需处理。当前 Map 条目：${keys.join(", ")}`);
+  console.log(`[already-patched] ${rel}：guarded 图标已存在，无需处理。当前 Map 条目：${keys.join(", ")}`);
   process.exit(0);
 }
 
 const plan = buildPatched(inspected.text);
 
 if (args.check) {
-  console.log(`[ready] ${TARGET_REL}：结构探测通过（锚点唯一）。`);
+  console.log(`[ready] ${rel}：结构探测通过（锚点唯一）。`);
   console.log(`  Map 条目：现有 ${plan.before.length} 个（${plan.before.join(", ")}）`);
   console.log(`  试算结果：补丁后 ${plan.after.length} 个（${plan.after.join(", ")}），Map 构造通过。`);
   console.log(`  将插入：${ENTRY.trim().split("\n")[0].trim()} …`);
@@ -236,7 +266,7 @@ if (!syntaxCheck(file)) {
 }
 try {
   const keys = evaluateGlyphMap(readFileSync(file, "utf8"));
-  console.log(`[patched] ${TARGET_REL}（备份：${backup}）`);
+  console.log(`[patched] ${rel}（备份：${backup}）`);
   console.log(`  Map 条目：${keys.join(", ")}`);
 } catch (error) {
   copyFileSync(backup, file);

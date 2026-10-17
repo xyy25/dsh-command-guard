@@ -91,33 +91,49 @@ seam 把问题推给卡片，无需改 dsh 源码：
   `cordis.patch.yml` 里的 `config.mode`。输入区的档位按钮只**读取**它来显示默认档，
   不执行任何命令。
 
-## dsh 客户端兼容（v0.1.2 / v0.1.5）
+## dsh 客户端兼容（v0.1.2 / v0.1.5 / 0.2.0）
 
-dsh v0.1.2 引入 `dsh-client-modules`（boot 图 + module table），v0.1.5 沿用同一机制。
+dsh v0.1.2 引入 `dsh-client-modules`（boot 图 + module table），v0.1.5 与 0.2.0 沿用同一机制。
 
 - **平台 seed**：v0.1.2 为 `react`、`react/jsx-runtime`、`react-dom`、`@deepseek-ai/cordis`、
   `@deepseek-ai/dsh-client-store`、`@deepseek-ai/dsh-client-ui-slots`、
-  `@deepseek-ai/dsh-client-ui-primitives`；v0.1.5 在此基础上新增 `react-dom/client` 与
+  `@deepseek-ai/dsh-client-ui-primitives`；v0.1.5 起新增 `react-dom/client` 与
   `@deepseek-ai/dsh-client-ui-dockkit`（**超集，向后兼容**）。第三方 client bundle 只能
   require seed 词；旧版 bundle 里 `require("@deepseek-ai/dsh-client-runtime/client")`
   （该包已移除）会直接导致 client 装载失败（“missed the module table … build-time externals drift”）。
-- **bundle 协议**：`window.__ModuleLoader__.load({ id, factory })` 在两个版本一致，
-  本插件的 `client/client.js` 同时适用于 v0.1.2 与 v0.1.5。
-- **用到的客户端契约**（已逐一对照两个版本的官方源码确认未变）：`commandUi`
-  （`decorate` + `ui.kind: "popupSelect"`）、`settingsScope.describe().ensure()/getSnapshot()
-  .view.namespaces`、`conversation.composer`、`conversation.input.left`
-  （`inject: (sessionId) => …`）、`sessions.binding(id)?.session` 与 `session.command()`。
+- **bundle 协议**：`window.__ModuleLoader__.load({ id, factory })` 三个版本一致，
+  本插件的 `client/client.js` 同时适用（只 require `react`）。
+- **用到的客户端契约**：
+
+  | 契约 | v0.1.2 | v0.1.5 | v0.2.0 |
+  |---|---|---|---|
+  | `commandUi`（`decorate` + `kind: "popupSelect"`） | ✓ | ✓ | ✓ |
+  | `conversation.composer`（chain，按 priority 升序选举） | ✓ | ✓ | ✓ |
+  | `conversation.input.left`（`inject: (sessionId) => …`） | ✓ | ✓ | ✓ |
+  | `sessions.binding(id)?.session` / `session.command()` | ✓ | ✓ | ✓ |
+  | 设置读取 `settingsScope.describe()` | ✓ | ✓ | **改为 `configForms.describe()`**（结构相同；旧名仍作为回退） |
+
 - **确认卡**：通过 `conversation.composer` 槽位接管 `intent.kind === "guard-review"` 的
   pending question（对 `PendingQuestion` 做鸭子类型，不 import 官方实现包），一次点击
-  允许/拒绝、输入框“提交”等交互保持。该接管依赖
-  `tools/patch-dsh-composer-guard-review.mjs` 打出的“让位”补丁（见下方“安装后处理”）。
-- **档位默认值**：客户端只**读取** host settings（namespace `commandGuard`）来显示默认档，
-  **不执行任何命令**——早期“进入会话即调用 `/guard` 查询当前档”的实现会让每次打开会话
-  都多出一条 `guard · …` 状态行，现已修复。
-- **宿主契约**（同样已在 v0.1.5 下确认未变）：`tools/pre-execute` waterfall
-  （`{kind:"allow"}|{kind:"ask"}|{kind:"deny"}`）、`ctx.userQuestions.ask`（`intent.kind`
-  无白名单，只校验 `intent.approve` 命名的选项存在且 `detail` 存在）、`commands.register`、
-  `settings.register(ns, schema, { base })`。
+  允许/拒绝、输入框“提交”等交互保持。dsh 0.2.0 起该槽明确“按 priority 升序选举、首个非
+  null 生效”，本插件 `priority: -20` 先于官方 `0`，**0.2.0 无需让位补丁**；0.1.x 仍建议跑
+  `tools/patch-dsh-composer-guard-review.mjs`。
+- **档位默认值**：客户端只**读取**设置快照来显示默认档（0.1.x 的 namespace `commandGuard`；
+  0.2.0+ 的插件 entry id，通常是 `command-guard`），**不执行任何命令**——早期“进入会话即调用
+  `/guard` 查询当前档”的实现会让每次打开会话都多出一条 `guard · …` 状态行，现已修复。
+- **宿主契约**：
+
+  | 契约 | v0.1.2 | v0.1.5 | v0.2.0 |
+  |---|---|---|---|
+  | `tools/pre-execute` waterfall（`exec = {name, arguments, agent?}`） | ✓ | ✓ | ✓ |
+  | `ctx.userQuestions.ask`（`intent.kind` 无白名单，校验 approve/detail） | ✓ | ✓ | ✓ |
+  | `commands.register({name, description, input:{hint}, handler})` | ✓ | ✓ | ✓ |
+  | `settings.register(ns, schema, {base})` | ✓ | ✓ | **已移除**（`SettingsForms`；设置表单由插件 `Config` 自动派生，值就是 config） |
+
+- **0.2.0 的 peerDependencies 校验**：dsh 用 `semver.satisfies(runtime, range, {includePrerelease:true})`
+  检查所有 `@deepseek-ai/dsh*` peer。`^0.1.1-rc.1` 的 caret 上界是 `<0.2.0-0`，**不覆盖
+  `0.2.0-rc.2`**，因此本插件的 peer 范围已改为 `"^0.1.1-rc.1 || ^0.2.0-rc.1"`（同时匹配
+  0.1.2 / 0.1.5 / 0.2.0 / 0.2.1）。
 - **构建**：`client/client.js` 由 `src/client/client.tsx` 经 `tsc` 与
   `build/bundle-client.mjs` 生成（只 require `react`），**不要手改产物**。
 
@@ -215,11 +231,12 @@ dsh v0.1.2 引入 `dsh-client-modules`（boot 图 + module table），v0.1.5 沿
 - agent 自审失败/超时/无路由时按 `agentFallback` 处理（默认回落规则引擎，避免"失效即放行"）。
 - 即使处于 agent 档，**critical 级硬规则**仍先于 agent 判定（`directDeny=false` 时询问、`true` 时直接拒绝），保证底线不被模型误判绕过。
 
-## dsh v0.1.5 会话格式迁移与历史会话修复
+## dsh 会话格式迁移与历史会话修复（v0.1.5 / 0.2.0）
 
-dsh v0.1.5 引入了**冻结的会话格式迁移链**（`v0 → v1 → v2 → v3`，当前版本 v3，由
-`dsh-session-format-catalog` 装配）。规则是：**v0 → v1 的迁移只接受冻结清单内的事件类型，
-连带 `ignorable: true` 的未知事件也直接拒绝**，于是整个会话被判为不可读：
+dsh v0.1.5 引入了**冻结的会话格式迁移链**（`v0 → v1 → v2 → v3`），v0.2.0 又追加
+`v3 → v4`（当前版本 v4，由 `dsh-session-format-catalog` 装配）。规则是：**v0 → v1 的迁移
+只接受冻结清单内的事件类型，连带 `ignorable: true` 的未知事件也直接拒绝**，于是整个会话
+被判为不可读：
 
 ```text
 历史加载失败：failed to observe session "…": format v0 contains unknown historical
@@ -262,18 +279,26 @@ node tools/repair-session-logs.mjs --dsh "<dsh-root>"   # 显式指定 dsh 安�
 - 删事件前会检查：被删事件不落在打包行（`text-chunks`/`reasoning-chunks`/`tool-call-chunks`）
   的序号区间内，且没有任何 `sourceEventSeqs`/`surfaceOp`/`shadowedSeqs`/`shadowedRange`/
   `messageSeqs`/`sourceEventSeq`/`throughSeq` 引用它——任一不满足即拒绝自动修复；
-- 用 **dsh 自己的目录**验证修复结果（`sessionFormatCatalog` 的 `validation: "current"`，
-  含 `Session.fromRestore` 完整校验）；校验不通过就不写盘；
+- **只处理 v0 文件**（先只读 header 判断版本）；v1+ 是 dsh 迁移的产物，脚本直接标记
+  「已是新版」并跳过，绝不用 v0 词汇表去改它；
+- 修复后用**自检**验证：seq 稠密、冻结清单、payload 语义，以及
+  `assertReleasedArtifactRelationships` 的关系校验（能检出 C 类）；不通过就不写盘。
+  **不再调用** catalog 的 `createRestore(validation:"current")`——dsh 0.2.0 的 `v3→v4`
+  迁移需要“子会话 catalog 事实”，单文件校验提供不了，会误报
+  `V3 catalog migration requires explicit historical child facts…`；
 - 写回时保持 **frame 0 恰好一行 header** + 单事件帧（与 dsh 自身的写回格式一致）；
 - 幂等：已修复或本来就干净的会话显示为「干净」。
 
 ### 重要提示
 
-- 修复后的会话**首次被 dsh 打开时会自动迁移为 v3 并写回文件**；那之后 **dsh 0.1.2 及
-  更早版本将无法再读这些会话**。脚本保留的 `<文件>.pre-repair.bak` 是唯一回退凭据。
-- 升级 dsh 不会影响已迁移的 v3 会话；但**不要**随意把 `.pre-repair.bak` 还原回去。
-- 本脚本面向 dsh **v0.1.5+**（需要 `dsh-session-format-catalog` 做权威校验）。旧版 dsh
+- 修复后的会话仍是 v0 格式；**首次被 dsh 打开时会自动迁移到当前格式（0.2.0 下是 v4）并
+  写回文件**。那之后 **旧版 dsh 将无法再读这些会话**。脚本保留的 `<文件>.pre-repair.bak`
+  是唯一回退凭据。
+- 升级 dsh 不会影响已迁移的会话；但**不要**随意把 `.pre-repair.bak` 还原回去。
+- 本脚本面向 dsh **v0.1.5+**（依赖 `dsh-session-format-v0-to-v1` 的冻结清单）。旧版 dsh
   不需要修复：当时的迁移器容忍 `ignorable: true` 的未知事件。
+- 若报告 `不可自动修复 … repeats advertised tool call`：这是历史日志本身的不一致
+  （同一步内重复广播同一 tool-call），与插件无关，需人工重建或等上游修复。
 
 ## 安装后处理：question intent 白名单补丁（仅 dsh v0.1.1-rc.x 需要）
 
@@ -311,21 +336,27 @@ node tools/patch-dsh-question-intent.mjs --dsh "<dsh-root>" --undo
   可运行 `--undo` 还原成官方文件。**但另外两个补丁脚本必须重跑**（见“升级 dsh 后的补丁清单”）。
 - 仍在 **v0.1.1-rc.x**：升级 dsh 会覆盖被打补丁的两个文件，需重跑一次脚本。
 
-## 安装后处理：composer 让位补丁（v0.1.2 / v0.1.5 必须）
+## 安装后处理：composer 让位补丁（v0.1.2 / v0.1.5；0.2.0 起无需）
 
 `conversation.composer` 是 chain/overlay 槽：渲染器按顺序遍历 occupant 的 `select`，
 只渲染**第一个**返回非 null 的。官方 `dsh-client-ui-user-questions` 的 occupant 对
 **所有** `PendingQuestion`（含 `guard-review`）都返回自身，第三方 occupant 永远轮不到；
 而官方槽渲染还要求 occupant 携带私有 `store` face，第三方无法在该槽自绘（直接注册会让
-输入区崩溃）。因此需要一处最小补丁：让官方对 `intent.kind === "guard-review"` 返回 `null`，
-把链继续交给本插件的 `GuardApprovalCard`；plan-review 与普通提问行为不变。
+输入区崩溃）。因此 0.1.x 需要一处最小补丁：让官方对 `intent.kind === "guard-review"`
+返回 `null`，把链继续交给本插件的 `GuardApprovalCard`；plan-review 与普通提问行为不变。
 
 该表达式在 v0.1.2 与 v0.1.5 的
 `node_modules/@deepseek-ai/dsh-client-ui-user-questions/lib/client.js` 中逐字符一致。
 
+**dsh 0.2.0 起不需要这个补丁**：`conversation.composer` 仍是 chain 槽，注册时按
+`priority ?? 0` 升序排序、`renderSlotChain` 取第一个非 null；本插件 occupant 的
+`priority: -20` 先于官方 `0`，`select` 会直接接管 `guard-review`。脚本因此默认跳过，
+只有 `--force` 才真的打补丁（实测万一未接管时的兜底）。
+
 ```sh
-node tools/patch-dsh-composer-guard-review.mjs --check   # 只探测，不写
-node tools/patch-dsh-composer-guard-review.mjs           # 打补丁（备份 .bak-composer-guard-review）
+node tools/patch-dsh-composer-guard-review.mjs --check   # 只探测；0.2.0 会提示 skipped
+node tools/patch-dsh-composer-guard-review.mjs           # 0.2.0 默认跳过；0.1.x 打补丁
+node tools/patch-dsh-composer-guard-review.mjs --force   # 0.2.0 也强制打补丁
 node tools/patch-dsh-composer-guard-review.mjs --undo    # 从备份还原
 ```
 
@@ -333,12 +364,20 @@ node tools/patch-dsh-composer-guard-review.mjs --undo    # 从备份还原
 > 用官方 `MarkdownText` 渲染 detail，触发槽渲染异常（输入区整体消失、`slot entry crashed
 > in 'conversation.composer'`）。现实现用 `<pre>` 原样显示文本，两个版本下均稳定。
 
-## 安装后处理：guarded 权限图标补丁（v0.1.2 / v0.1.5）
+## 安装后处理：guarded 权限图标补丁（v0.1.2 / v0.1.5 / 0.2.0）
 
-权限下拉（`dsh-client-ui-conversation` 的 `PermissionSelect`）只对设计集内的预设画图标，
-profile patch 新增的 `guarded` 会落到 `permissionGlyph() === undefined` 的“无图标”分支。
-脚本在 `permissionGlyphs` Map 里插入「盾牌 + 几何化字母 G」的 16×16 图标（复用同文件内的
-`shieldOutline`），与 read-only 的对勾、danger-full-access 的感叹号区分开。
+权限下拉只对设计集内的预设画图标，profile patch 新增的 `guarded` 会落到
+`permissionGlyph() === undefined` 的“无图标”分支。脚本在 `permissionGlyphs` Map 里插入
+「盾牌 + 几何化字母 G」的 16×16 图标，与 read-only 的对勾、danger-full-access 的感叹号区分开。
+
+**目标文件随版本变化**（脚本自动探测，取第一个含 `permissionGlyphs` 的文件）：
+
+| dsh 版本 | 目标文件 |
+|---|---|
+| 0.2.0+ | `node_modules/@deepseek-ai/dsh-client-ui-permission-presets/lib/client.js`（权限选择器已迁出 conversation） |
+| 0.1.x | `node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js` |
+
+插入的 svg 是**自包含**的（不引用目标文件里的 `shieldOutline` 等变量），因此同一条目在两处都可用。
 
 ```sh
 node tools/patch-dsh-permission-glyph.mjs --check   # 只探测，不写
@@ -366,8 +405,8 @@ dsh 升级会覆盖 `node_modules`，因此**每次升级后都要重跑**（三
 | 脚本 | 何时需要 |
 |---|---|
 | `tools/patch-dsh-question-intent.mjs` | 仅 v0.1.1-rc.x；v0.1.2+ 自动跳过 |
-| `tools/patch-dsh-composer-guard-review.mjs` | v0.1.2 / v0.1.5 **必须**（确认卡接管） |
-| `tools/patch-dsh-permission-glyph.mjs` | v0.1.2 / v0.1.5（「帮我审核」图标） |
+| `tools/patch-dsh-composer-guard-review.mjs` | v0.1.2 / v0.1.5 需要；**v0.2.0+ 自动跳过**（priority 选举已生效，`--force` 可覆盖） |
+| `tools/patch-dsh-permission-glyph.mjs` | v0.1.2 / v0.1.5 / **v0.2.0** 都需要（目标文件随版本自动切换） |
 
 三个脚本都会自动探测 dsh 安装目录（当前 `node` 可执行文件推导 → `npm root -g` → 已知
 路径形态），也可用 `--dsh "<root>"` 或环境变量 `DSH_ROOT` 显式指定。本机
@@ -411,6 +450,14 @@ npm test
 - 注意：宿主/客户端改动请编辑 `src/`（含 React 的用 `.tsx`，其余用 `.ts`），**不要手改 `lib/` 与 `client/` 产物**——它们是构建生成物，会被 `npm run build` 覆盖。
 
 ## 常见问题
+
+- **dsh 启动时报 `Plugin dsh-command-guard@0.1.0 is incompatible with dsh 0.2.0-rc.2`？** 这是
+  dsh 0.2.0 新增的 peerDependencies 校验：`^0.1.1-rc.1` 的 caret 上界是 `<0.2.0-0`，不覆盖
+  `0.2.0-rc.2`。本插件包已把 peer 范围改为 `"^0.1.1-rc.1 || ^0.2.0-rc.1"`；用 profile 重新
+  `dsh plugin add` 后即消失。临时绕过可用 `dsh plugin allow-version` 授予豁免（不推荐长期用）。
+- **Windows 弹出“应用程序无法正常启动（0xc0000142）”？** 与插件无关，通常是瞬时资源压力
+  （例如一次性解压大量会话日志）或安全软件导致的进程初始化失败。关掉提示、重启 dsh 即可；
+  排查会话时优先用 `repair-session-logs.mjs` 的只读模式（它只读 header，不会全量解压）。
 
 - **为什么有时看到的是插件的确认卡，有时是 harness 原生的批准框？** 正常情况下（web UI 会话、
   live root agent）弹**插件自绘的确认卡**（含输入框，有内容时"拒绝"变"提交"）。自绘卡不可用的场景

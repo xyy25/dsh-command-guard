@@ -228,13 +228,19 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
 
   // ---------- settings：默认档位（新会话；复用 host settings 服务） ----------
   ctx.inject(["settings"], (settingsCtx: any) => {
+    // dsh 0.2.0 起 settings 服务改为 SettingsForms：不再提供
+    // register(ns, schema, { base })，设置表单由插件 Config 自动派生
+    // （namespace 即 profile patch 里的 entry id，值就是 config）。
+    // 因此 0.2.0+ 直接用 config.mode；只有 0.1.x 才注册独立 namespace。
+    const settings = settingsCtx.settings;
+    if (typeof settings?.register !== "function") return;
     const schema = z.object({
       mode: z.union(
         MODE_IDS.map((id) => z.const(id).description(modeLabel(id))),
       ).required(),
     });
     try {
-      const scope = settingsCtx.settings.register(MODE_SETTINGS_NS, schema, {
+      const scope = settings.register(MODE_SETTINGS_NS, schema, {
         base: { mode: modeOf(config.mode) },
       });
       defaultModeSource = () => modeOf(scope.get().mode);
