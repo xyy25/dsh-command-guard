@@ -9,6 +9,14 @@ declare module "react" {
   export const useRef: <T>(initial: T) => { current: T };
   export const createElement: (...args: any[]) => any;
   export const Fragment: any;
+  /** 仅用于错误边界（confirm 卡里的 Markdown 兜底）。 */
+  export class Component<P = {}, S = {}> {
+    constructor(props: P);
+    props: P;
+    state: S;
+    setState(state: S | ((prev: S) => S)): void;
+    render(): any;
+  }
 }
 
 declare module "@deepseek-ai/dsh-client-ui-primitives" {

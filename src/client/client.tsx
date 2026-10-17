@@ -29,6 +29,7 @@ const CARD_CSS = [
   ".cga_dot{background:var(--dsw-alias-state-warn-primary);border-radius:50%;width:8px;height:8px}",
   ".cga_body{max-height:240px;flex-direction:column;gap:6px;padding:12px 16px 0;display:flex;overflow:auto}",
   ".cga_meta{color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;white-space:pre-wrap}",
+  ".cga_md{color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}",
   ".cga_actionRow{justify-content:flex-end;align-items:center;gap:8px;padding:14px 16px;display:flex}",
   ".cga_input{flex:1;min-width:0;height:34px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;padding:0 10px}",
   ".cga_input:focus{outline:none;border-color:var(--dsw-alias-interactive-accent)}",
@@ -132,8 +133,47 @@ function isGuardReview(pending: unknown): pending is PendingLike {
 }
 
 // ---------------------------------------------------------------
+// detail 的 Markdown 渲染：富文本优先、纯文本保底。
+//
+// 为什么以前用 <pre>：v0.1.2 时直接渲染 MarkdownText 会让整个 composer 槽崩溃。
+// 根因不是"槽不支持 Markdown"，而是 MarkdownText 的 labels 是**必需**参数
+// （内部直接读 context.labels.code.*，没有可选链）——不传就抛 TypeError。
+// dsh 0.2.0 的官方提问卡就在同一个槽里用 MarkdownText 渲染 question.detail，
+// 并传入 labels。
+//
+// 因此这里：
+//   1) 仅在 configForms 服务存在（dsh 0.2.0+）时启用 Markdown；
+//   2) 传齐必需 labels；
+//   3) 用错误边界兜底：一旦渲染失败立即退回 <pre>，输入区不受影响。
+// ---------------------------------------------------------------
+const primitivesRuntime: any = typeof require === "function" ? require("@deepseek-ai/dsh-client-ui-primitives") : undefined;
+const MarkdownText: any = primitivesRuntime?.MarkdownText;
+/** dsh 0.2.0+ 才启用（旧版 labels 契约未验证，保持 <pre>）。 */
+let markdownEnabled = false;
+/** MarkdownText 必需的 labels（缺 code 会抛 TypeError）。 */
+const MD_LABELS = {
+  code: {
+    copyLabel: "复制",
+    copiedLabel: "已复制",
+    toolbarLabels: { codeLabel: "代码", wrapLabel: "自动换行", unwrapLabel: "取消换行" },
+  },
+  footnotes: "脚注",
+};
+
+/** 只包住 Markdown 子树的错误边界：渲染失败就回退到纯文本。 */
+const MarkdownBoundary: any = class extends React.Component<{ fallback: any; children?: any }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+  render(): any {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+};
+
+// ---------------------------------------------------------------
 // 确认卡：props.matched = composer 槽选中的 pending question。
-// detail 用纯文本 <pre>（避免 Markdown 组件在槽内渲染引入的不确定性）。
+// detail 在 0.2.0+ 用 Markdown 渲染；旧版或渲染失败时回退 <pre>。
 // ---------------------------------------------------------------
 function GuardApprovalCard(props: { matched?: PendingLike }) {
   const pending = props.matched;
@@ -162,7 +202,15 @@ function GuardApprovalCard(props: { matched?: PendingLike }) {
         </div>
         <div className="cga_body" tabIndex={0} role="group" aria-label={LOC.aria}>
           {question.detail ? (
-            <pre className="cga_meta">{question.detail}</pre>
+            markdownEnabled && MarkdownText !== undefined ? (
+              <MarkdownBoundary fallback={<pre className="cga_meta">{question.detail}</pre>}>
+                <div className="cga_md">
+                  <MarkdownText text={question.detail} labels={MD_LABELS} />
+                </div>
+              </MarkdownBoundary>
+            ) : (
+              <pre className="cga_meta">{question.detail}</pre>
+            )
           ) : (
             <div className="cga_meta">{LOC.headline}</div>
           )}
@@ -318,6 +366,8 @@ export function apply(ctx: any): void {
   const configForms = ctx.get("configForms");
   const settingsScope = ctx.get("settingsScope");
   const settingsFace = configForms ?? settingsScope;
+  // dsh 0.2.0+ 才启用 Markdown 渲染（旧版 labels 契约未验证，保持纯文本）。
+  markdownEnabled = configForms !== undefined && MarkdownText !== undefined;
 
   const liveOf = (sessionId: string): any => {
     const binding = sessions.binding(sessionId);

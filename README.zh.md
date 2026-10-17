@@ -360,9 +360,16 @@ node tools/patch-dsh-composer-guard-review.mjs --force   # 0.2.0 也强制打补
 node tools/patch-dsh-composer-guard-review.mjs --undo    # 从备份还原
 ```
 
-> 为什么确认卡里的 `detail`（命令预览与判定说明）必须按**纯文本**渲染：早期实现在该槽位
-> 用官方 `MarkdownText` 渲染 detail，触发槽渲染异常（输入区整体消失、`slot entry crashed
-> in 'conversation.composer'`）。现实现用 `<pre>` 原样显示文本，两个版本下均稳定。
+> **确认卡 detail 的渲染方式**：0.2.0 起用官方 `MarkdownText` 渲染（加粗、``` 代码块、列表、
+> 引用块），与官方提问卡同一槽位同一做法；0.1.x 仍按纯文本 `<pre>` 显示。
+>
+> 早期（v0.1.2）曾因 `MarkdownText` 让整个 composer 槽崩溃（输入区消失、
+> `slot entry crashed in 'conversation.composer'`）而退回 `<pre>`。后来定位到根因：
+> `MarkdownText` 的 `labels` 是**必需**参数——它内部直接读 `labels.code.copyLabel` 等
+> （没有可选链），漏传即抛 `TypeError`。现在固定传入 `labels`，并用**错误边界**包住
+> Markdown 子树：一旦渲染失败立即回退 `<pre>`，输入区不受影响。
+>
+> host 侧的 `buildAskDetail` 本就输出 Markdown（`**…**`、代码围栏、列表、引用），无需改动。
 
 ## 安装后处理：guarded 权限图标补丁（v0.1.2 / v0.1.5 / 0.2.0）
 
