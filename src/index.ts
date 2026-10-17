@@ -33,6 +33,7 @@
 // 本进程内记忆，不做跨重启持久化。
 
 import z from "@deepseek-ai/schemastery";
+import { SessionModeStore } from "./session-modes.js";
 import { DEFAULT_ALLOW_COMMANDS, DEFAULT_RULES, type RuleDef } from "./rules.js";
 import { compilePatterns, compileRules, decideCommand, previewCommand, describeRule, type Rule, type Decision } from "./risk.js";
 import { reviewWithLlm, reviewByAgent } from "./llm.js";
@@ -69,6 +70,7 @@ interface GuardConfig {
   denyMinLevel: string;
   logDecisions: boolean;
   maxCommandPreviewBytes: number;
+  queryModeOnOpen: boolean;
   llm: { enabled: boolean; provider?: string; model?: string; timeoutMs: number; allowOnFailure: boolean };
 }
 
@@ -111,6 +113,13 @@ export const Config = z.object({
   /** 命令预览的最大字节数（用于日志与短原因）。 */
   maxCommandPreviewBytes: z.number().min(16).default(300),
   /**
+   * 允许客户端在展开档位菜单时查询一次真实档位（执行 /guard 无参）。
+   * 查询会写 command/run + command/done 两条**官方**事件；客户端按会话缓存
+   * 12 小时，因此每个会话最多产生一次这样的记录。默认 true（显示准确优先）；
+   * 想彻底避免留痕可设为 false。
+   */
+  queryModeOnOpen: z.boolean().default(true),
+  /**
    * 可选 LLM 审核（仅 rules 档对未命中规则的命令生效，向后兼容旧版；
    * agent 档请改用 mode: agent-*）。agent-* 档复用其中的
    * provider/model/timeoutMs。
@@ -137,9 +146,11 @@ function modeLabel(id: string): string {
   return MODE_LABEL_ZH[id] ?? id;
 }
 
-/** 会话的最小面：只需要稳定 id（本插件不再读写 harness 会话事件）。 */
+/** 会话的最小面：稳定 id + header.parentSession（分支继承用）。 */
 interface SessionLike {
   id?: string;
+  header?: { parentSession?: string };
+  parentSession?: string;
 }
 
 /** 取会话的持久 id（无会话/无 id 时返回 undefined）。 */
@@ -212,18 +223,14 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
   /** 档位默认值：settings 注册成功 → settings 当前值；否则 config.mode。 */
   let defaultModeSource = (): string => config.mode;
 
-  /**
-   * 会话级档位覆盖（/guard <mode> 切换的结果）。
-   * 仅在本进程内按会话 id 记忆——不要写进 harness 会话日志（自定义事件
-   * 类型会导致日志无法重放，见文件头注释）。进程重启后新会话回落默认档。
-   */
-  const sessionModes = new Map<string, string>();
+  // 会话级档位：持久化到插件自己的 JSON 文件（绝不写 harness 会话事件），
+  // 解析顺序 = 本会话记录 → 父会话继承（分支）→ 默认档。
+  const modeStore = new SessionModeStore({ logger: ctx.logger });
+  modeStore.load();
 
-  /** 当前会话档位：会话覆盖 → 默认档。 */
+  /** 当前会话档位（含分支继承）。 */
   function currentModeOf(session: SessionLike | undefined | null): string {
-    const id = sessionIdOf(session);
-    if (id !== undefined && sessionModes.has(id)) return sessionModes.get(id)!;
-    return defaultModeSource();
+    return modeStore.resolve(session, defaultModeSource());
   }
 
   // ---------- settings：默认档位（新会话；复用 host settings 服务） ----------
@@ -275,7 +282,7 @@ export function apply(ctx: HostContext, config: GuardConfig): void {
         }
         if (session) {
           const id = sessionIdOf(session);
-          if (id !== undefined) sessionModes.set(id, normalized);
+          if (id !== undefined) modeStore.set(id, normalized, session.header?.parentSession ?? session.parentSession);
         }
         return { kind: "success", text: normalized };
       },

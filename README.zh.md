@@ -171,6 +171,41 @@ dsh v0.1.2 引入 `dsh-client-modules`（boot 图 + module table），v0.1.5 与
 > agent 自审）。想收紧可调 `askMinLevel`/`directDeny`/`disabledRuleIds`，或用 `agent-*`
 > 档让模型按阈值裁决。建议配合 `rules` 档（确定性）使用。
 
+## 会话档位持久化与分支继承
+
+审核档位按**会话**记忆，并持久化到插件自己的文件（**完全不写入 harness 会话日志**）：
+
+```text
+$DSH_HOME/command-guard/session-modes.json      # 缺省 ~/.dsh/command-guard/session-modes.json
+{ "version": 1, "modes": { "<sessionId>": { "mode": "agent-strict", "parent": "<父会话 id>|null", "at": 1729… } } }
+```
+
+**解析顺序**（每次审核时）：
+
+1. 本进程内刚切换的值（同一张表，已在内存）；
+2. 该会话自己持久化的值；
+3. **父会话的值**——分支/fork 出来的新会话在 header 里带 `parentSession`，据此继承；
+   命中后会顺手把“继承快照”缓存到新会话（带 `parent`），因此**多级** fork（A→B→C，
+   即使 B 从未切过档）也能沿链传播；
+4. 默认档（settings 的默认档 → `config.mode`）。
+
+写入时机：`/guard <mode>` 成功时写内存并落盘（原子替换）。继承得到的值不额外写回，
+只有首次解析时缓存一次。
+
+清理：保存时顺手丢弃 **90 天**未更新、或超过 **2000 条**的旧记录。
+
+注意事项：
+
+- 文件不可写时**降级为纯内存**（warn 一次），审核不中断；文件损坏视为空表。
+- 会话被删除后条目惰性保留，由上述清理回收。
+- 客户端按钮：优先显示 localStorage 里缓存的**真实档位**（按会话，12 小时 TTL），
+  其次才用 settings 默认档；本次会话内切换档位会立即更新缓存。
+- 配置项 **`queryModeOnOpen`**（默认 `true`）：允许在**展开档位菜单时**查询一次真实档位
+  （执行 `/guard` 无参）。查询会写 `command/run` + `command/done` 两条**官方**事件，
+  但由于按会话缓存 12 小时，**每个会话最多只产生一次**这样的记录；设为 `false` 可彻底
+  避免留痕（此时按钮在未切换过的旧会话上可能显示默认档）。
+- 这套持久化不碰会话事件，所以不会重演历史上的“自定义事件导致会话不可读”。
+
 ## 配置
 
 在 `cordis.patch.yml` 的 entry 中通过 `config` 覆盖。完整示例：

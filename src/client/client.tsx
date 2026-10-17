@@ -150,6 +150,8 @@ const primitivesRuntime: any = typeof require === "function" ? require("@deepsee
 const MarkdownText: any = primitivesRuntime?.MarkdownText;
 /** dsh 0.2.0+ 才启用（旧版 labels 契约未验证，保持 <pre>）。 */
 let markdownEnabled = false;
+/** 是否允许展开菜单时查询真实档位（来自配置 queryModeOnOpen，默认 true）。 */
+let queryModeOnOpen = true;
 /** MarkdownText 必需的 labels（缺 code 会抛 TypeError）。 */
 const MD_LABELS = {
   code: {
@@ -243,8 +245,42 @@ function GuardApprovalCard(props: { matched?: PendingLike }) {
 interface GuardZoneApi {
   /** 读 host settings 里的默认档位（无副作用：不执行 /guard，不写会话状态行）。 */
   defaultMode(): Promise<string | null>;
+  /** 查询当前会话**真实**档位（执行 /guard 无参；会写两条官方命令事件，需节流调用）。 */
+  currentMode(): Promise<string | null>;
+  /** 是否允许在展开菜单时查询真实档位（来自配置 queryModeOnOpen）。 */
+  queryOnOpen(): boolean;
   /** 用户主动切换档位（执行 /guard <mode>）。 */
   switchMode(modeId: string): Promise<string>;
+}
+
+// ---------------------------------------------------------------
+// 真实档位的客户端缓存：每个会话最多查询一次（12 小时内），切换档位时更新。
+// 这样"展开菜单查询"不会变成每次展开都往会话里写命令事件。
+// ---------------------------------------------------------------
+const MODE_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+function modeCacheKey(sessionId: string): string {
+  return `dsh-command-guard:session-mode:${sessionId}`;
+}
+function readCachedMode(sessionId: string | undefined): string | null {
+  if (sessionId === undefined || typeof localStorage === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(modeCacheKey(sessionId));
+    if (raw === null) return null;
+    const parsed = JSON.parse(raw) as { mode?: unknown; at?: unknown };
+    if (typeof parsed.mode !== "string" || typeof parsed.at !== "number") return null;
+    if (Date.now() - parsed.at > MODE_CACHE_TTL_MS) return null;
+    return parsed.mode;
+  } catch {
+    return null;
+  }
+}
+function writeCachedMode(sessionId: string | undefined, mode: string): void {
+  if (sessionId === undefined || typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(modeCacheKey(sessionId), JSON.stringify({ mode, at: Date.now() }));
+  } catch {
+    /* 隐私模式/配额不足时忽略 */
+  }
 }
 /**
  * 输入区"命令审核"按钮（样式与旧版一致）：圆形"仅图标"按钮（与"+"号同款），
@@ -259,14 +295,16 @@ function GuardZone(props: { sessionId?: string; guardApi?: GuardZoneApi }) {
   const [error, setError] = React.useState<string | null>(null);
   const hostRef = React.useRef<HTMLSpanElement | null>(null);
 
-  // 初始档位：读 settings 默认档（无副作用，可安全重复）。
+  // 初始档位：客户端缓存（真实值）优先，其次 settings 默认档。两者都无副作用。
   React.useEffect(() => {
+    const cached = readCachedMode(props.sessionId);
+    if (cached !== null) setCurrent(cached);
     if (!api || typeof api.defaultMode !== "function") return;
     let alive = true;
     api
       .defaultMode()
       .then((value) => {
-        if (alive && typeof value === "string") setCurrent(value);
+        if (alive && cached === null && typeof value === "string") setCurrent(value);
       })
       .catch(() => {
         /* 读取失败时保持默认图标 */
@@ -275,6 +313,32 @@ function GuardZone(props: { sessionId?: string; guardApi?: GuardZoneApi }) {
       alive = false;
     };
   }, [api, props.sessionId]);
+
+  // 展开菜单时按需查询真实档位：每会话 12 小时内最多查一次（走缓存），
+  // 避免每次展开都往会话里写 command/run + command/done。
+  React.useEffect(() => {
+    if (!open || !api || typeof api.currentMode !== "function") return;
+    const cached = readCachedMode(props.sessionId);
+    if (cached !== null) {
+      setCurrent(cached);
+      return;
+    }
+    if (typeof api.queryOnOpen === "function" && !api.queryOnOpen()) return;
+    let alive = true;
+    api
+      .currentMode()
+      .then((value) => {
+        if (!alive || typeof value !== "string") return;
+        setCurrent(value);
+        writeCachedMode(props.sessionId, value);
+      })
+      .catch(() => {
+        /* 查询失败时保持当前显示 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open]);
 
   // 点击外部关闭向上弹层。
   React.useEffect(() => {
@@ -296,6 +360,7 @@ function GuardZone(props: { sessionId?: string; guardApi?: GuardZoneApi }) {
       .then(() => {
         setCurrent(id);
         setError(null);
+        writeCachedMode(props.sessionId, id);
       })
       .catch((cause: unknown) => {
         const message = cause instanceof Error ? cause.message : String(cause);
@@ -422,6 +487,42 @@ export function apply(ctx: any): void {
       return result.value?.matched === true ? result.value.text : modeId;
     });
   };
+  /**
+   * 查询当前会话**真实**档位（/guard 无参）。
+   * 会写 command/run + command/done 两条官方事件，所以只在客户端缓存失效时调用。
+   */
+  const guardCurrentMode = (sessionId: string): Promise<string | null> => {
+    const live = liveOf(sessionId);
+    if (live === undefined) return Promise.resolve(null);
+    return live.command("/guard").then((result: any) => {
+      if (!result?.ok || result.value?.matched !== true) return null;
+      return typeof result.value.text === "string" ? result.value.text : null;
+    });
+  };
+  /** 读配置 queryModeOnOpen（默认 true = 显示准确优先）。 */
+  const readQueryFlag = async (): Promise<boolean> => {
+    try {
+      const face = settingsFace?.describe?.();
+      if (face === undefined) return true;
+      const snapshot = typeof face.getSnapshot === "function" ? face.getSnapshot() : undefined;
+      const namespaces = snapshot?.view?.namespaces;
+      if (!Array.isArray(namespaces)) return true;
+      for (const ns of GUARD_SETTINGS_NS) {
+        const hit = namespaces.find((item: any) => item?.ns === ns);
+        if (typeof hit?.value?.queryModeOnOpen === "boolean") return hit.value.queryModeOnOpen;
+      }
+      return true;
+    } catch {
+      return true;
+    }
+  };
+  void readQueryFlag()
+    .then((value) => {
+      queryModeOnOpen = value;
+    })
+    .catch(() => {
+      /* 读不到就用默认 true */
+    });
 
   // 1) 确认卡：composer 槽位接管 guard-review。
   ctx.slots.inject("conversation.composer", () =>
@@ -453,6 +554,8 @@ export function apply(ctx: any): void {
             sessionId,
             guardApi: {
               defaultMode: readDefaultMode,
+              currentMode: () => guardCurrentMode(sessionId),
+              queryOnOpen: () => queryModeOnOpen,
               switchMode: (modeId: string) => guardSwitch(sessionId, modeId),
             },
           }),

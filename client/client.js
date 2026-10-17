@@ -169,6 +169,8 @@ const primitivesRuntime = typeof require === "function" ? require("@deepseek-ai/
 const MarkdownText = primitivesRuntime?.MarkdownText;
 /** dsh 0.2.0+ 才启用（旧版 labels 契约未验证，保持 <pre>）。 */
 let markdownEnabled = false;
+/** 是否允许展开菜单时查询真实档位（来自配置 queryModeOnOpen，默认 true）。 */
+let queryModeOnOpen = true;
 /** MarkdownText 必需的 labels（缺 code 会抛 TypeError）。 */
 const MD_LABELS = {
     code: {
@@ -225,6 +227,42 @@ function GuardApprovalCard(props) {
                 React.createElement("button", { type: "button", className: "cga_btn cga_btnReject", disabled: busy, onClick: () => commit(denyLabel, hasNote ? note.trim() : undefined) }, hasNote ? LOC.submit : LOC.reject),
                 React.createElement("button", { type: "button", className: "cga_btn cga_btnPrimary", disabled: busy, onClick: () => commit(approveLabel) }, LOC.allow)))));
 }
+// ---------------------------------------------------------------
+// 真实档位的客户端缓存：每个会话最多查询一次（12 小时内），切换档位时更新。
+// 这样"展开菜单查询"不会变成每次展开都往会话里写命令事件。
+// ---------------------------------------------------------------
+const MODE_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+function modeCacheKey(sessionId) {
+    return `dsh-command-guard:session-mode:${sessionId}`;
+}
+function readCachedMode(sessionId) {
+    if (sessionId === undefined || typeof localStorage === "undefined")
+        return null;
+    try {
+        const raw = localStorage.getItem(modeCacheKey(sessionId));
+        if (raw === null)
+            return null;
+        const parsed = JSON.parse(raw);
+        if (typeof parsed.mode !== "string" || typeof parsed.at !== "number")
+            return null;
+        if (Date.now() - parsed.at > MODE_CACHE_TTL_MS)
+            return null;
+        return parsed.mode;
+    }
+    catch {
+        return null;
+    }
+}
+function writeCachedMode(sessionId, mode) {
+    if (sessionId === undefined || typeof localStorage === "undefined")
+        return;
+    try {
+        localStorage.setItem(modeCacheKey(sessionId), JSON.stringify({ mode, at: Date.now() }));
+    }
+    catch {
+        /* 隐私模式/配额不足时忽略 */
+    }
+}
 /**
  * 输入区"命令审核"按钮（样式与旧版一致）：圆形"仅图标"按钮（与"+"号同款），
  * 用盾形图标的颜色/符号区分档位；点击后弹层**向上**展开，外部点击关闭。
@@ -237,15 +275,18 @@ function GuardZone(props) {
     const [open, setOpen] = React.useState(false);
     const [error, setError] = React.useState(null);
     const hostRef = React.useRef(null);
-    // 初始档位：读 settings 默认档（无副作用，可安全重复）。
+    // 初始档位：客户端缓存（真实值）优先，其次 settings 默认档。两者都无副作用。
     React.useEffect(() => {
+        const cached = readCachedMode(props.sessionId);
+        if (cached !== null)
+            setCurrent(cached);
         if (!api || typeof api.defaultMode !== "function")
             return;
         let alive = true;
         api
             .defaultMode()
             .then((value) => {
-            if (alive && typeof value === "string")
+            if (alive && cached === null && typeof value === "string")
                 setCurrent(value);
         })
             .catch(() => {
@@ -255,6 +296,34 @@ function GuardZone(props) {
             alive = false;
         };
     }, [api, props.sessionId]);
+    // 展开菜单时按需查询真实档位：每会话 12 小时内最多查一次（走缓存），
+    // 避免每次展开都往会话里写 command/run + command/done。
+    React.useEffect(() => {
+        if (!open || !api || typeof api.currentMode !== "function")
+            return;
+        const cached = readCachedMode(props.sessionId);
+        if (cached !== null) {
+            setCurrent(cached);
+            return;
+        }
+        if (typeof api.queryOnOpen === "function" && !api.queryOnOpen())
+            return;
+        let alive = true;
+        api
+            .currentMode()
+            .then((value) => {
+            if (!alive || typeof value !== "string")
+                return;
+            setCurrent(value);
+            writeCachedMode(props.sessionId, value);
+        })
+            .catch(() => {
+            /* 查询失败时保持当前显示 */
+        });
+        return () => {
+            alive = false;
+        };
+    }, [open]);
     // 点击外部关闭向上弹层。
     React.useEffect(() => {
         if (!open)
@@ -278,6 +347,7 @@ function GuardZone(props) {
             .then(() => {
             setCurrent(id);
             setError(null);
+            writeCachedMode(props.sessionId, id);
         })
             .catch((cause) => {
             const message = cause instanceof Error ? cause.message : String(cause);
@@ -373,6 +443,48 @@ function apply(ctx) {
             return result.value?.matched === true ? result.value.text : modeId;
         });
     };
+    /**
+     * 查询当前会话**真实**档位（/guard 无参）。
+     * 会写 command/run + command/done 两条官方事件，所以只在客户端缓存失效时调用。
+     */
+    const guardCurrentMode = (sessionId) => {
+        const live = liveOf(sessionId);
+        if (live === undefined)
+            return Promise.resolve(null);
+        return live.command("/guard").then((result) => {
+            if (!result?.ok || result.value?.matched !== true)
+                return null;
+            return typeof result.value.text === "string" ? result.value.text : null;
+        });
+    };
+    /** 读配置 queryModeOnOpen（默认 true = 显示准确优先）。 */
+    const readQueryFlag = async () => {
+        try {
+            const face = settingsFace?.describe?.();
+            if (face === undefined)
+                return true;
+            const snapshot = typeof face.getSnapshot === "function" ? face.getSnapshot() : undefined;
+            const namespaces = snapshot?.view?.namespaces;
+            if (!Array.isArray(namespaces))
+                return true;
+            for (const ns of GUARD_SETTINGS_NS) {
+                const hit = namespaces.find((item) => item?.ns === ns);
+                if (typeof hit?.value?.queryModeOnOpen === "boolean")
+                    return hit.value.queryModeOnOpen;
+            }
+            return true;
+        }
+        catch {
+            return true;
+        }
+    };
+    void readQueryFlag()
+        .then((value) => {
+        queryModeOnOpen = value;
+    })
+        .catch(() => {
+        /* 读不到就用默认 true */
+    });
     // 1) 确认卡：composer 槽位接管 guard-review。
     ctx.slots.inject("conversation.composer", () => ctx.slots.register({
         name: "conversation.composer",
@@ -395,6 +507,8 @@ function apply(ctx) {
                 sessionId,
                 guardApi: {
                     defaultMode: readDefaultMode,
+                    currentMode: () => guardCurrentMode(sessionId),
+                    queryOnOpen: () => queryModeOnOpen,
                     switchMode: (modeId) => guardSwitch(sessionId, modeId),
                 },
             }),

@@ -1,6 +1,6 @@
 {
   "name": "dsh-command-guard",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "DeepSeek Harness 插件：自动审核 agent 发出的 shell 命令，风险命令以界面确认卡片询问用户（支持硬规则 / agent 自审多档位），可配 directDeny 硬拦截底线。",
   "type": "module",
   "main": "lib/index.js",
