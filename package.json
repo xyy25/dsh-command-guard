@@ -9,12 +9,14 @@
     "./risk": "./lib/risk.js",
     "./rules": "./lib/rules.js",
     "./client": "./client/client.js",
+    "./typert": "./lib/typert.host.js",
     "./package.json": "./package.json"
   },
   "dsh": {
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-ui-slots"
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-api-remotes"
       ],
       "platform": "web"
     }
@@ -41,6 +43,9 @@
     "security"
   ],
   "license": "MIT",
+  "dependencies": {
+    "zod": "^4.6.7"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-llm": "^0.1.1-rc.1 || ^0.2.0-rc.1",

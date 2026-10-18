@@ -198,13 +198,38 @@ $DSH_HOME/command-guard/session-modes.json      # 缺省 ~/.dsh/command-guard/se
 
 - 文件不可写时**降级为纯内存**（warn 一次），审核不中断；文件损坏视为空表。
 - 会话被删除后条目惰性保留，由上述清理回收。
-- 客户端按钮：优先显示 localStorage 里缓存的**真实档位**（按会话，12 小时 TTL），
-  其次才用 settings 默认档；本次会话内切换档位会立即更新缓存。
-- 配置项 **`queryModeOnOpen`**（默认 `true`）：允许在**展开档位菜单时**查询一次真实档位
-  （执行 `/guard` 无参）。查询会写 `command/run` + `command/done` 两条**官方**事件，
-  但由于按会话缓存 12 小时，**每个会话最多只产生一次**这样的记录；设为 `false` 可彻底
-  避免留痕（此时按钮在未切换过的旧会话上可能显示默认档）。
-- 这套持久化不碰会话事件，所以不会重演历史上的“自定义事件导致会话不可读”。
+
+### 客户端如何读到真实档位（零轮询、零会话事件）
+
+图标状态不再依赖执行 `/guard`，而是走两条只读通道：
+
+| 通道 | 路径 | 用途 |
+|---|---|---|
+| 查询 | `GET /api/command-guard/session-mode?sessionId=…` | 进入会话时读一次，返回“本会话 → 父会话继承 → 默认档”解析后的结果 |
+| 推送 | `GET /api/command-guard/events`（**SSE** 长连接） | 执行 `/guard <mode>` 切换后，host 立即推送 `{sessionId, mode}`，图标实时更新 |
+
+- localStorage 缓存（按会话，12 小时 TTL）只用于首屏快速显示，**正确性以 host 为准**；
+- 点图标菜单切换档位时本地立即更新并写缓存，不产生任何查询；
+- 这两条通道都**不写会话事件**。
+
+### 为什么不是轮询 / typert / connection RPC（2026-10 实测，dsh 0.2.0-rc.2）
+
+- `connection.register(...)` **不存在**；正确入口 `connection.rpc.handle(...)` 内部用
+  `owner.webServer` 注册路由，会抛 `cannot get property "webServer" without inject`
+  （全库没有任何官方插件使用该 API）；`connection.rpc.intercept` 只接受 `/api`，
+  而该共享通道已被 `api-gateway` 独占；
+- `/plugins/*` 前缀被 `dsh-client-modules` 的 bundle 路由占用（只允许 GET/HEAD，其余 405）；
+- **typert**：host 的 `./typert` manifest 能通过 `typert-loader` 校验，但第三方插件的
+  `remote.<namespace>` 不会被客户端创建——`dsh-api-remotes` 的 `TYPERT_REMOTE` 是
+  **构建期静态内联**的官方插件表，第三方 manifest 进不去；
+- 官方事件转发白名单（`API_REMOTE_FORWARDED_EVENTS`）是写死的，**不含命令事件**，
+  `api-session/activity` 也只对用户消息触发；
+- 自定义会话事件对第三方插件**不可用**（会让格式迁移拒绝历史会话，见上文“会话格式迁移”）；
+- **可行路径**：`webServer.register` 在 **`/api/command-guard/…`** 下注册路由（GET/POST 均可，
+  社区插件 `@linxin666/dsh-client-ui-task-board` 的 `/api/task-board`、`dsh1024` 的
+  `/dsh1024` 都是这个模式），再用 SSE 做推送。
+
+- 这套持久化与推送都不碰会话事件，所以不会重演历史上的“自定义事件导致会话不可读”。
 
 ## 配置
 
