@@ -13,6 +13,9 @@
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-slots",
@@ -28,7 +31,8 @@
     "build",
     "tsconfig.json",
     "README.zh.md",
-    "LICENSE"
+    "LICENSE",
+    "cordis.patch.yml"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p src/client/tsconfig.json && node build/bundle-client.mjs",

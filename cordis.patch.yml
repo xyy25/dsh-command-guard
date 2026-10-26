@@ -1,0 +1,43 @@
+# dsh-command-guard 的组合包补丁（bundle patch）。
+#
+# 这是插件作为「profile 的一个独立层」被安装/启用时插入的行；`name` 是包名，
+# 由 profile 的 node_modules 解析。下面的 config 是插件的**默认配置**（原先放在
+# profile 的 cordis.patch.yml 里，现收进包内，安装即用）。
+#
+# 自定义：在 profile 自己的 cordis.patch.yml 里写
+#   - id: command-guard
+#     config: { ...完整配置... }
+# 注意 id-targeted 覆盖会**替换整行 config**，需要重述每一个键。
+- insert:
+    - id: command-guard
+      name: 'dsh-command-guard'
+      config:
+        enabled: true # 总开关
+        tools: [ pwsh, bash ] # 审核哪些工具
+        mode: agent-standard # 默认档位（rules / agent-very-loose / agent-loose / agent-standard / agent-strict）
+        directDeny: false # true：命中 denyMinLevel 的命令直接拒绝（不弹卡）；默认询问
+        denyMinLevel: critical # directDeny=true 时的直拒底线
+        askMinLevel: high # rules 档触发弹卡的最低级别（可调 medium 收紧）
+        agentFallback: rules # agent 自审不可用时的回落：rules / allow / ask
+        logDecisions: true # 每次决策写入日志
+        maxCommandPreviewBytes: 300 # 日志与短原因中的命令预览长度
+        # 额外白名单（正则，忽略大小写；不能覆盖规则判定）
+        allowCommands:
+          - '^npm\s+run\b'
+        # 禁用部分默认规则
+        disabledRuleIds:
+          - rmdir-empty
+        # 追加自定义规则（level: low | medium | high | critical）
+        rules:
+          - id: my-danger
+            level: high
+            pattern: '\bRemove-SomethingDangerous\b'
+            description: 自定义危险命令
+            hint: 自定义提示
+        # 旧版 LLM 兜底（仅 rules 档、对未命中规则的命令生效；agent 档请用 mode: agent-*）
+        llm:
+          enabled: false
+          # provider: my-provider     # 缺省取调用 agent 的 provider/model
+          # model: my-model
+          timeoutMs: 15000
+          allowOnFailure: true
