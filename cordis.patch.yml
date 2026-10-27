@@ -41,3 +41,27 @@
           # model: my-model
           timeoutMs: 15000
           allowOnFailure: true
+
+# 自定义权限预设「帮我审核」：Full access + approval ask，由本插件在 pre-execute
+# 放行低风险命令、只把风险命令送进 approval seam 弹窗。
+# 注意：id-targeted 覆盖会替换整行 config，所以这里把官方三档一起重述。
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+        name: 只读
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+        name: 工作区写
+      guarded:
+        sandbox: danger-full-access
+        approval: ask
+        name: 帮我审核
+        description: Full access + 自动命令审核：仅检测到的风险命令请求批准
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+        name: 完整权限

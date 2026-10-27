@@ -552,3 +552,35 @@ npm test
   `Format-Volume`/`Clear-Disk`/`diskpart` 等卷操作与带盘符的 `format C:`；裸 `format` 已从规则中移除（回归测试覆盖）。
 - **agent 档会不会每一条命令都调用模型？** 会为每一条未命中白名单的命令做一次轻量自审；档位越宽松
   判定后触发询问越少，档位不改变是否调用的行为。若不需要 agent 自审，使用 `rules` 档即可。
+
+## 更新日志
+
+### 1.2.2
+
+- **会话档位持久化与分支继承**：档位写入插件自有 JSON（`~/.dsh/command-guard/session-modes.json`），
+  不碰 harness 会话事件；新建分支会话继承原会话档位。
+- **图标实时同步（零轮询、零会话事件）**：进入会话时 `GET /api/command-guard/session-mode` 读取真实档位，
+  `/guard <mode>` 切换后由 SSE `GET /api/command-guard/events` 实时推送，图标立即更新。
+- **组合包（bundle）支持**：新增 `dsh.bundle.patch` 与包内 `cordis.patch.yml`，可在插件 tab 直接安装；
+  默认配置与「帮我审核」权限预设（`guarded`）随包分发，新设备安装后即可选用。
+- 客户端查询链路改为 typert → `/api` 路由回退（实测 typert 对第三方插件不可用，详见「客户端如何读到真实档位」）。
+- 新增英文版 `README.md`。
+
+### 1.2.1
+
+- 适配 dsh 0.2.0：设置读取从 `settingsScope` 切到 `configForms`；
+  `permissionGlyphs` 迁到 `@deepseek-ai/dsh-client-ui-permission-presets`。
+- 确认卡支持 Markdown 渲染命令详情。
+- 新增补丁脚本：权限图标、composer review 让位。
+
+### 1.1.0
+
+- 自绘命令审核确认卡（接管 composer 的 `guard-review` 槽位）。
+- 输入区盾形档位菜单与 `/guard` 命令装饰。
+- 多档位：`rules` / `agent-very-loose` / `agent-loose` / `agent-standard` / `agent-strict`，
+  以及 `directDeny` 硬拦截。
+
+### 1.0.0
+
+- 首个版本：基于硬规则（`rules`）的命令审核，风险命令弹确认卡。
+
